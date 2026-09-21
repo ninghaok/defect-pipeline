@@ -1,0 +1,12 @@
+seed: 42
+dataset_root: 'D:\dataset_523\dataset_523'
+category_directories:
+  qiumian_fupai: qiumianfupai
+  qiumian_xiepai: qiumianxiepai
+  di_mian_detection: qiusaidimian
+  wa_yuan_detection: qiusaiwaiyuan
+realistic_ng_ratios:
+  qiumian_fupai: 0.002
+  qiumian_xiepai: 0.005
+  di_mian_detection: 0.01
+  wa_yuan_detection: 0.02

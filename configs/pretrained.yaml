@@ -1,0 +1,31 @@
+factory: detected_pipeline.plugins.pretrained_patchcore:create_plugin
+config:
+  cache_root: results/pretrained_cache
+  results_root: results/pretrained_artifacts
+  dino_weight: models/dinov2_vitl14_pretrain.pth
+  angle_weight: models/checkpoints_pro_angle.pth
+  backbone: dinov2-large
+  device: cuda:0
+  seed: 42
+  # validated cold-start setting: single 224 view, 32 k-center references, all bank OK, coreset 2 %
+  image_size: 224
+  reference_size: 32
+  coreset_percentage: 0.02
+  top_fraction: 0.005
+  batch_size: 4
+  kcenter_batch_size: 16
+  boundary_ratio: 0.05
+  roi_masks:
+    wa_yuan_detection: roi/qiusaiwaiyuan.png
+  thresholds:
+    min_calibration_ok: 50
+    zero_ng_quantile: {default: 0.90, wa_yuan_detection: 0.95}
+    ladder_quantiles: [0.80, 0.90, 0.95, 0.97, 0.99, 0.995, 0.999]
+    full_rule_min_ng: 30
+    target_recall: {default: 0.95, wa_yuan_detection: 0.99}
+    max_fpr: 0.2
+  segmentation:
+    pixel_quantile: 0.997     # absolute term: quantile of calibration OK pixels
+    peak_fraction: 0.7        # relative term: fraction of the image's own peak
+    min_area: 128
+    max_regions: 3

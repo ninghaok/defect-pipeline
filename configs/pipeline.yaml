@@ -1,0 +1,55 @@
+project_root: .
+workspace_root: results/workspace
+pretrained_config: pretrained.yaml
+review_provider: folder_ground_truth
+folder_ground_truth:
+  ok_directory_names: [OK]
+  ng_directory_names: [NG]
+  mask_directory_names: [mask, masks]
+  mask_stem_suffixes: ['', _t, _mask]
+  mask_extensions: [.png, .bmp, .jpg, .jpeg, .tif, .tiff]
+  category_directory_names:
+    qiumian_fupai: [qiumian_fupai, qiumianfupai]
+    qiumian_xiepai: [qiumian_xiepai, qiumianxiepai]
+    di_mian_detection: [di_mian_detection, qiusaidimian]
+    wa_yuan_detection: [wa_yuan_detection, qiusaiwaiyuan]
+allowed_image_suffixes: [.jpg, .jpeg, .png, .bmp, .tif, .tiff]
+simulation_stream_seed: 42
+review_batch_size: {default: 200, qiumian_xiepai: 100}
+# sampled review of model-OK images (model-NG are always reviewed): top 20 % by score fully reviewed,
+# middle 40 % spot-checked at 10 % (>= 5), lowest 40 % at 2 % (>= 2); a segment with an NG in its sample is fully reviewed.
+review_sampling:
+  enabled: true
+  high_fraction: 0.20
+  middle_fraction: 0.40
+  middle_rate: 0.10
+  middle_min: 5
+  low_rate: 0.02
+  low_min: 2
+
+lifecycle:
+  # confirmed NG (with a valid mask) are split once and forever: 75 % YOLO training, 25 % calibration
+  split_seed: 42
+  ng_calibration_fraction: 0.25
+  # training OK: initial memory-bank OK + confirmed stream OK, batch-stratified, never the calibration OK
+  train_ok_limit: 400
+  min_train_ok: 100
+  # pretrained image threshold is re-selected every N confirmed NG (rule chosen by NG count, see pretrained.yaml)
+  pretrained_recalibrate_every_ng: 5
+  # YOLO milestones: first candidate at 40 NG, then every 20 NG up to 100, then every 40 (outer ring: every 40 from the start)
+  first_train_ng: 40
+  retrain_increment: {default: 20, wa_yuan_detection: 40}
+  retrain_increment_after: 100
+  retrain_increment_late: 40
+  # unreviewed OK of a passed segment (pseudo OK) may be used as YOLO training OK (never calibration)
+  pseudo_ok_in_training: true
+  # a candidate that passes the offline gate runs as shadow from the next batch; it is judged once the shadow
+  # window holds >= shadow_min_ng reviewed NG or shadow_max_batches batches, with the same gate as offline
+  shadow_min_ng: 10
+  shadow_max_batches: 5
+  yolo_thresholds:
+    target_recall: {default: 0.95, wa_yuan_detection: 0.99}
+    max_fpr: 0.2
+  promotion:
+    max_fpr_increase: 0.0
+    min_fpr_reduction_for_equal_fn: 0.01

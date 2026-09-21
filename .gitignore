@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+# run outputs and state
+results/
+workspace/
+# model weights (see models/README.md)
+*.pt
+*.pth
+*.onnx
+*.engine
+pipeline_models.zip

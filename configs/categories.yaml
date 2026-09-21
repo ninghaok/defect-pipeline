@@ -1,0 +1,10 @@
+categories:
+  qiumian_fupai:
+    display_name: 球面俯拍
+  qiumian_xiepai:
+    display_name: 球面斜拍
+  di_mian_detection:
+    display_name: 底面检测
+  wa_yuan_detection:
+    display_name: 外圆检测
+

@@ -1,0 +1,20 @@
+base_checkpoint: models/yolo26s-seg.pt
+epochs: 100
+imgsz: 1024
+batch: 4
+workers: 0
+seed: 42
+amp: true
+deterministic: true
+patience: 0          # fixed epochs, last.pt
+device: 0
+mosaic: 1.0
+close_mosaic: 10
+copy_paste: 0.3
+mask_ratio: 4
+inference:
+  imgsz: 1024
+  conf_floor: 0.001
+  nms_iou: 0.7
+  max_det: 100
+  device: 0

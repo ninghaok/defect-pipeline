@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "detected-full-pipeline"
+version = "0.1.0"
+description = "Industrial anomaly detection feedback, training and deployment loop"
+requires-python = ">=3.10"
+dependencies = [
+  "PyYAML>=6.0", "Pillow>=10.0", "numpy>=1.26,<2.0", "scipy>=1.11",
+  "scikit-learn>=1.4", "scikit-image>=0.22", "pandas>=2.1",
+  "opencv-python==4.10.0.84", "timm>=1.0",
+  "tqdm>=4.66"
+]
+
+[project.optional-dependencies]
+train = ["ultralytics==8.4.115"]
+test = []
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

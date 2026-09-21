@@ -1,0 +1,6 @@
+categories:
+  wa_yuan_detection:
+    source_directory: qiusaiwaiyuan
+    mask: roi/qiusaiwaiyuan.png
+    convention: white_is_selected
+    fill_outside: 255
