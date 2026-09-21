@@ -16,6 +16,8 @@ import random
 import sys
 from pathlib import Path
 
+import numpy as np
+
 PROJECT = Path(__file__).resolve().parents[1]
 SRC = PROJECT / "src"
 if str(SRC) not in sys.path:
@@ -140,42 +142,51 @@ def main():
     test_cache = workspace / "test_cache" / category
 
     # ------------------------------------------------------------------ fixed test set helpers
+    visuals = bool(config.get("fixed_test_visuals", True))
+
     def pretrained_predict(path):
         from detected_pipeline.pretrained import hybrid_regions
         heat, valid = pretrained.detector.heatmap(category, read_image(path)); score = pretrained.detector.image_score(heat, valid)
         seg = pretrained.segmentation
-        mask, _ = hybrid_regions(heat, valid, float(pretrained.thresholds[category]["pixel_threshold"]), float(seg.get("peak_fraction", 0.7)),
-                                 int(seg.get("min_area", 128)), int(seg.get("max_regions", 3)))
-        return score, mask
+        mask, stats = hybrid_regions(heat, valid, float(pretrained.thresholds[category]["pixel_threshold"]), float(seg.get("peak_fraction", 0.7)),
+                                     int(seg.get("min_area", 128)), int(seg.get("max_regions", 3)))
+        boxes = [[*r["bbox_xyxy"], f"#{r['rank']} {r['peak']:.2f}"] for r in stats["regions"]]
+        return {"score": score, "mask": mask, "heat": heat, "boxes": boxes, "extra": {"regions": stats["regions"]}}
 
     def yolo_predict_fn(detector, mask_threshold):
         def predict(path):
-            image = read_image(path); score, confs, _, masks = detector.infer(image)
-            return score, detector.union(masks, confs >= mask_threshold, image.shape[:2])
+            image = read_image(path); score, confs, boxes, masks = detector.infer(image)
+            keep = confs >= mask_threshold
+            heat = np.zeros(image.shape[:2], np.float32)
+            for m, c in zip(masks, confs):
+                heat[m] = np.maximum(heat[m], c)
+            kept_boxes = [[*b, f"{c:.2f}"] for b, c in zip(boxes[keep], confs[keep])]
+            instances = [{"confidence": float(c), "bbox_xyxy": [float(v) for v in b], "kept": bool(k)} for c, b, k in zip(confs, boxes, keep)]
+            return {"score": score, "mask": detector.union(masks, keep, image.shape[:2]), "heat": heat, "boxes": kept_boxes,
+                    "extra": {"mask_conf_threshold": float(mask_threshold), "instances": sorted(instances, key=lambda z: -z["confidence"])[:20]}}
         return predict
 
     def test_pretrained(role):
         if not fixed_test:
             return None
-        key = "pretrained-" + pretrained.detector.categories[category]["manifest"]["fingerprint"]
-        rows = score_fixed_test(fixed_test, pretrained_predict, test_cache / f"{key}.json", key, roi_mask, lambda m: print(m, flush=True))
+        key = "pretrained-" + pretrained.detector.categories[category]["manifest"]["fingerprint"]; cache = test_cache / key
+        rows = score_fixed_test(fixed_test, pretrained_predict, cache, key, roi_mask, visuals, lambda m: print(m, flush=True))
         thresholds = pretrained.thresholds[category]
-        result = fixed_test_metrics(rows, float(thresholds["image_threshold"]))
-        write_test_report(workspace, category, key, role, result, {"threshold_rule": thresholds["rule"], "calibration_ng": thresholds.get("calibration_ng", 0)})
-        return result
+        write_test_report(workspace, category, key, role, rows, float(thresholds["image_threshold"]), cache,
+                          {"threshold_rule": thresholds["rule"], "calibration_ng": thresholds.get("calibration_ng", 0)})
+        return fixed_test_metrics(rows, float(thresholds["image_threshold"]))
 
     def test_yolo(model, role):
         if not fixed_test:
             return None
-        key = "yolo-" + sha256_file(Path(model["checkpoint"]))[:16]; cache = test_cache / f"{key}.json"
-        if not cache.exists():
+        key = "yolo-" + sha256_file(Path(model["checkpoint"]))[:16]; cache = test_cache / key
+        if not (cache / "scores.json").exists():
             detector = YoloSegDetector(Path(model["checkpoint"]), config["training"].get("inference", {}), roi_mask)
-            score_fixed_test(fixed_test, yolo_predict_fn(detector, float(model["thresholds"]["mask_conf_threshold"])), cache, key, roi_mask, lambda m: print(m, flush=True))
+            score_fixed_test(fixed_test, yolo_predict_fn(detector, float(model["thresholds"]["mask_conf_threshold"])), cache, key, roi_mask, visuals, lambda m: print(m, flush=True))
             del detector
-        rows = score_fixed_test(fixed_test, None, cache, key, roi_mask)
-        result = fixed_test_metrics(rows, float(model["thresholds"]["image_threshold"]))
-        write_test_report(workspace, category, model["model_version"], role, result)
-        return result
+        rows = score_fixed_test(fixed_test, None, cache, key, roi_mask, visuals)
+        write_test_report(workspace, category, model["model_version"], role, rows, float(model["thresholds"]["image_threshold"]), cache)
+        return fixed_test_metrics(rows, float(model["thresholds"]["image_threshold"]))
 
     # ------------------------------------------------------------------ pretrained threshold maintenance
     def confirmed_ng_paths():

@@ -3,15 +3,15 @@
 ## 目录
 
 ```text
-D:\ninghao\pipeline                 工程
+E:\ninghao\pipeline                 工程
 D:\dataset_523\dataset_523          数据集：<class>\{train,val,test}\{OK,NG}，<class>\mask\<stem>_t.bmp（黑色为缺陷）
-D:\ninghao\pipeline\models          yolo26s-seg.pt、dinov2_vitl14_pretrain.pth、checkpoints_pro_angle.pth
+E:\ninghao\pipeline\models          yolo26s-seg.pt、dinov2_vitl14_pretrain.pth、checkpoints_pro_angle.pth
 ```
 
 ## 环境
 
 ```powershell
-cd D:\ninghao\pipeline
+cd E:\ninghao\pipeline
 Set-ExecutionPolicy -Scope Process Bypass
 .\scripts\setup_windows_pipeline.ps1       # 创建 conda 环境 pipeline（torch cu128、ultralytics 8.4.115 等）
 conda activate pipeline
@@ -24,7 +24,7 @@ python .\cli\check_local_installation.py   # cuda: true, missing: []
 
 ```powershell
 conda activate pipeline
-cd D:\ninghao\pipeline
+cd E:\ninghao\pipeline
 $env:KMP_DUPLICATE_LIB_OK = "TRUE"
 .\scripts\run_lifecycle_windows.ps1 -RunName lifecycle_seg_01
 ```

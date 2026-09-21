@@ -73,7 +73,8 @@
 3. **判定**：累计复核 NG ≥ `shadow_min_ng`（10）或满 `shadow_max_batches`（5）批，用同样三条规则比较影子样本上的漏检与误报：通过 → 切换为正式模型；否则 `rejected_shadow`。
    影子期间到达新里程碑则旧候选 `superseded`。切换后不保留旧模型影子。
 
-**固定测试集评测**：每个进入产线的模型（预训练每次重标定后、每个 YOLO 候选）在固定测试集上评测召回、误报、AUROC、NG IoU，写入 `test_reports/<category>/`，逐图得分缓存避免重复推理。
+**固定测试集评测**：每个进入产线的模型（预训练每次重标定后、每个 YOLO 候选、切换时）在固定测试集上评测召回、误报、AUROC、NG IoU，写入 `test_reports/<category>/<时间>_<角色>_<模型>/`，
+按 tp/fp/fn/tn 分目录保存原图、原始 mask、预测 mask、热力图、带框图和 score.json；逐图结果缓存，每个模型只推理一次。
 
 ## 6. YOLO-seg 推理策略（切换后的正式模型）
 
@@ -96,6 +97,7 @@
 | pretrained_recalibrate_every_ng | 5 | pipeline.yaml lifecycle |
 | first_train_ng / retrain_increment / after / late | 40 / 20（外圆 40）/ 100 / 40 | pipeline.yaml lifecycle |
 | shadow_min_ng / shadow_max_batches | 10 / 5 | pipeline.yaml lifecycle |
+| fixed_test_visuals | true | pipeline.yaml |
 | review_sampling high/middle 比例，middle/low 抽检率与最小张数 | 0.20 / 0.40，10%（≥5）/ 2%（≥2） | pipeline.yaml review_sampling |
 | pseudo_ok_in_training | true | pipeline.yaml lifecycle |
 | yolo target_recall / max_fpr | 0.95（外圆 0.99）/ 0.2 | pipeline.yaml lifecycle.yolo_thresholds |

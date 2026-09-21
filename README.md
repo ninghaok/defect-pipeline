@@ -37,13 +37,13 @@ roi/qiusaiwaiyuan.png   外圆 ROI（白色为检测区）
 
 ```powershell
 conda activate pipeline
-cd D:\ninghao\pipeline
+cd E:\ninghao\pipeline
 python .\cli\check_local_installation.py
 .\scripts\run_lifecycle_windows.ps1 -RunName lifecycle_seg_01
 ```
 
 结果位于 `results\<RunName>`：`workspace\batch_reports\<category>` 每批指标，`workspace\promotion_reports` 每个里程碑的离线比较，
-`workspace\test_reports\<category>` 每个产线模型的固定测试集评测，`workspace\model_registry\<category>` 候选与生产模型，`pretrained_cache\<category>\thresholds.json` 预训练阈值历史，
+`workspace\test_reports\<category>` 每个产线模型的固定测试集评测（按 tp/fp/fn/tn 保存原图、原始 mask、预测 mask、热力图、带框图），`workspace\model_registry\<category>` 候选与生产模型，`pretrained_cache\<category>\thresholds.json` 预训练阈值历史，
 `reports\classification_metrics.*` 汇总。
 
 ## 边界

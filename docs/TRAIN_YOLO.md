@@ -17,7 +17,7 @@
 
 ```powershell
 conda activate pipeline
-cd D:\ninghao\pipeline
+cd E:\ninghao\pipeline
 .\scripts\train_yolo_windows.ps1 -Category di_mian_detection
 .\scripts\train_yolo_windows.ps1 -Category wa_yuan_detection -TrainNgLimit 60 -Epochs 100 -SkipTest
 ```

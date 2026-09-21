@@ -16,6 +16,8 @@ folder_ground_truth:
 allowed_image_suffixes: [.jpg, .jpeg, .png, .bmp, .tif, .tiff]
 simulation_stream_seed: 42
 review_batch_size: {default: 200, qiumian_xiepai: 100}
+# fixed test set: save original / original mask / pred_mask / heatmap / boxed per image under test_reports/<category>/<model>/{tp,fp,fn,tn}
+fixed_test_visuals: true
 # sampled review of model-OK images (model-NG are always reviewed): top 20 % by score fully reviewed,
 # middle 40 % spot-checked at 10 % (>= 5), lowest 40 % at 2 % (>= 2); a segment with an NG in its sample is fully reviewed.
 review_sampling:

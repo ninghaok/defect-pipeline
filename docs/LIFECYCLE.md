@@ -53,9 +53,14 @@ YOLO 的得分 0（无检出）永远不是合法阈值。阈值文件附带召�
 
 ## 固定测试集评测（`evaluation.py`）
 
-每个进入产线的模型都在固定测试集上评测并记录：预训练在每次阈值重标定后（角色 production），YOLO 候选训练完成后（角色 candidate），切换为正式模型时再记一次（角色 production，读缓存不重推理）。
-指标：召回、OK 误报率、精确率、AUROC、NG 平均 IoU（漏检计 0）。每个模型的逐图得分与 mask IoU缓存在 `workspace/test_cache/<category>/`，
-预训练只改阈值时不重新推理。结果写 `workspace/test_reports/<category>/<时间>_<角色>_<模型>.json` 并追加到 `test_history.jsonl`。
+每个进入产线的模型都在固定测试集上评测并记录：预训练在每次阈值重标定后（角色 production），YOLO 候选训练完成后（角色 candidate），切换为正式模型时再记一次（角色 production）。
+指标：召回、OK 误报率、精确率、AUROC、NG 平均 IoU（漏检计 0）。每个模型只推理一次：逐图得分、预测 mask、热力图、带框图缓存在
+`workspace/test_cache/<category>/<模型>/`，预训练只改阈值时不重新推理。
+
+每次评测生成 `workspace/test_reports/<category>/<时间>_<角色>_<模型>/`，按 tp/fp/fn/tn 分目录，每张图一个文件夹：
+`original.<ext>`（原图硬链接）、`original_mask.<ext>`（NG 的原始 GT，硬链接）、`pred_mask.png`、`heatmap.jpg`（预训练：热力图；YOLO：逐像素最高实例置信度）、
+`boxed.jpg`（预训练：叠加热力图与 Top-3 区域框及峰值；YOLO：保留实例框及置信度）、`score.json`（得分、阈值、判定、IoU、区域或实例列表）。
+另有 `cases.csv` 与 `report.json`，`test_history.jsonl` 汇总全部评测。可视化可用 `fixed_test_visuals: false` 关闭。
 
 ## 输出
 
