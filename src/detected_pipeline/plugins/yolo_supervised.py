@@ -66,7 +66,7 @@ class YoloSegDetector:
                 masks = np.stack([cv2.resize(m.astype(np.uint8), (image.shape[1], image.shape[0]), interpolation=cv2.INTER_NEAREST) > 0 for m in masks])
             if roi is not None:
                 keep = np.array([(m & roi).any() for m in masks], bool)
-                confs, boxes, masks = confs[keep], boxes[keep], masks[keep]
+                confs, boxes, masks = confs[keep], boxes[keep], masks[keep] & roi
         else:
             confs = np.zeros(0); boxes = np.zeros((0, 4)); masks = np.zeros((0,) + image.shape[:2], bool)
         return (float(confs.max()) if len(confs) else 0.0), confs, boxes, masks

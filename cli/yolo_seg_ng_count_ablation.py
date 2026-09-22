@@ -23,6 +23,7 @@ import yaml
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / 'src'))
 from detected_pipeline.training.runner import run_yolo_seg_training
+from detected_pipeline.calibration import auroc as score_auroc, classification_metrics
 
 # training OK count per category; the whole val split is the calibration set and doubles as the
 # training-time validation set (fixed epochs, no model selection -> no leakage). Matches the DLL engine.
@@ -48,7 +49,7 @@ def roi_filter(category, confs, boxes, masks):
     roi = roi_for(category, masks.shape[1:]) if len(masks) else None
     if roi is None or not len(confs): return confs, boxes, masks
     keep = np.array([(m & roi).any() for m in masks])
-    return confs[keep], boxes[keep], masks[keep]
+    return confs[keep], boxes[keep], masks[keep] & roi
 EXT = {'.jpg','.jpeg','.png','.bmp','.tif','.tiff','.webp'}
 CONF_GRID = np.unique(np.r_[0.001,0.002,0.005,np.linspace(.01,.99,99),.995,.999])
 
@@ -85,6 +86,7 @@ def gt(root, image):
     value = cv2.imdecode(np.fromfile(p, np.uint8), cv2.IMREAD_GRAYSCALE)
     if value is None or value.shape != shape: raise ValueError(f'Mask/image mismatch: {p}')
     defect = value < 128  # Dataset: black defect, white background. Never infer polarity.
+    if not defect.any(): raise ValueError(f'NG mask has no defect pixels: {p}')
     roi = roi_for(root.name, shape)
     return defect & roi if roi is not None else defect
 
@@ -182,7 +184,7 @@ def calibrate(model, root, items, out, a):
         rows=[r for r in search if r['recall']>=level]
         best=min(rows,key=lambda r:(r['ok_false_positive_rate'],-r['threshold'])) if rows else None
         ladder.append(dict(recall_level=level,threshold=best['threshold'] if best else None,recall=best['recall'] if best else None,ok_false_positive_rate=best['ok_false_positive_rate'] if best else None))
-    auroc=float(np.mean([s_ng>s_ok for s_ng in scores[np.array(labels)] for s_ok in scores[~np.array(labels)]]))
+    auroc=score_auroc(scores, labels)
     conf_rows=[dict(mask_conf_threshold=float(t),mean_iou=float(v/max(1,ng))) for t,v in zip(CONF_GRID,sums)]
     seg=max(conf_rows,key=lambda r:(r['mean_iou'],r['mask_conf_threshold']))
     table(out/'calibration_scores.csv',records); table(out/'classification_threshold_search.csv',search); table(out/'mask_conf_threshold_search.csv',conf_rows)
@@ -194,12 +196,13 @@ def calibrate(model, root, items, out, a):
 
 def evaluate(model,root,items,out,thresholds,a):
     rows=[]; t=thresholds['classification']['threshold']; mt=thresholds['segmentation']['mask_conf_threshold']
+    excluded_outside_roi=0
     test_dir=out/'test'
     if test_dir.exists():
         if test_dir.resolve().parent != out.resolve(): raise ValueError('Unsafe test output path')
         shutil.rmtree(test_dir)
     for case in ('tp','fp','fn','tn'): (test_dir/case).mkdir(parents=True,exist_ok=True)
-    infer(model,prep(root.name, read(items[0])),a)  # warm up outside timing
+    if items: infer(model,prep(root.name, read(items[0])),a)  # warm up outside timing
     for i,image in enumerate(items):
         source=prep(root.name, read(image)); score,confs,boxes,masks,ms=infer(model,source,a)
         confs,boxes,masks=roi_filter(root.name,confs,boxes,masks); score=float(confs.max()) if len(confs) else 0.0
@@ -207,6 +210,9 @@ def evaluate(model,root,items,out,thresholds,a):
         keep=(confs>=mt) if predicted else np.zeros(len(confs),bool)
         mask=union(masks,keep,source.shape[:2])
         target=gt(root,image); u=(mask|target).sum(); inter=int((mask&target).sum())
+        if actual and not target.any():
+            excluded_outside_roi+=1
+            continue
         iou=float(inter/u) if actual and u else (0.0 if actual else None)
         case='tp' if actual and predicted else 'fn' if actual else 'fp' if predicted else 'tn'
         folder=test_dir/case/f'{i:05d}'; folder.mkdir(parents=True,exist_ok=True)
@@ -227,11 +233,16 @@ def evaluate(model,root,items,out,thresholds,a):
         if (i+1)%20==0: print(f'TEST {i+1}/{len(items)}',flush=True)
     table(out/'test_scores.csv',rows)
     labels=np.array([r['label']=='NG' for r in rows]); scores=np.array([r['score'] for r in rows])
-    result=metrics(labels,[r['prediction']=='NG' for r in rows])
-    result.update(test_auroc=float(np.mean([s_ng>s_ok for s_ng in scores[labels] for s_ok in scores[~labels]])),
-                  mean_iou_all_ng=float(np.mean([r['iou'] for r in rows if r['iou'] is not None])),
-                  mean_inference_ms=float(np.mean([r['inference_ms'] for r in rows])),
-                  p95_inference_ms=float(np.percentile([r['inference_ms'] for r in rows],95)),
+    result=classification_metrics(labels,[r['prediction']=='NG' for r in rows])
+    ng_rows=[r for r in rows if r['label']=='NG']
+    total_union=sum(r['union'] for r in ng_rows)
+    result.update(test_auroc=score_auroc(scores, labels),
+                  iou_micro=sum(r['intersection'] for r in ng_rows)/total_union if total_union else None,
+                  primary_segmentation_metric='iou_micro',
+                  excluded_outside_roi=excluded_outside_roi,
+                  mean_iou_all_ng=float(np.mean([r['iou'] for r in ng_rows])) if ng_rows else None,
+                  mean_inference_ms=float(np.mean([r['inference_ms'] for r in rows])) if rows else None,
+                  p95_inference_ms=float(np.percentile([r['inference_ms'] for r in rows],95)) if rows else None,
                   image_threshold=t,mask_conf_threshold=mt,calibration_auroc=thresholds['classification']['auroc'],
                   calibration_recall=thresholds['classification']['recall'],calibration_fpr=thresholds['classification']['ok_false_positive_rate'],
                   max_fpr=thresholds['classification']['max_fpr'],fpr_cap_binding=thresholds['classification']['fpr_cap_binding'])

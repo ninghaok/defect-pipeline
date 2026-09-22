@@ -54,8 +54,11 @@ YOLO 的得分 0（无检出）永远不是合法阈值。阈值文件附带召�
 ## 固定测试集评测（`evaluation.py`）
 
 每个进入产线的模型都在固定测试集上评测并记录：预训练在每次阈值重标定后（角色 production），YOLO 候选训练完成后（角色 candidate），切换为正式模型时再记一次（角色 production）。
-指标：召回、OK 误报率、精确率、AUROC、NG 平均 IoU（漏检计 0）。每个模型只推理一次：逐图得分、预测 mask、热力图、带框图缓存在
-`workspace/test_cache/<category>/<模型>/`，预训练只改阈值时不重新推理。
+指标：召回、OK 误报率、精确率、AUROC、NG 前景 micro IoU（主指标），保留逐图平均 IoU 作为辅助值。
+只检测 ROI 内缺陷，漏检图的 GT 像素仍计入 micro IoU 并集。缺失/无效 GT 会使分割指标不可用，不当成 0 分。
+在线批次与汇总仅统计已验证的审核子集，明确排除初始化 OK 和伪标签，不代表完整在线流。
+逐图得分、预测 mask、热力图、带框图缓存在 `workspace/test_cache/<category>/<模型>/`；数据、GT、ROI、权重或推理参数变更会使缓存失效，
+只改图像分类阈值时仍可复用原始预测。具体口径、字段和兼容说明见 [METRICS.md](METRICS.md)。
 
 每次评测生成 `workspace/test_reports/<category>/<时间>_<角色>_<模型>/`，按 tp/fp/fn/tn 分目录，每张图一个文件夹：
 `original.<ext>`（原图硬链接）、`original_mask.<ext>`（NG 的原始 GT，硬链接）、`pred_mask.png`、`heatmap.jpg`（预训练：热力图；YOLO：逐像素最高实例置信度）、

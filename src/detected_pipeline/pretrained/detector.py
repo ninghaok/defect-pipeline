@@ -20,6 +20,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 
 from detected_pipeline.roi import read_image
+from detected_pipeline.cache_identity import file_identity
 from detected_pipeline.util import atomic_write_json, sha256_file
 
 from .features import FeatureNetworks, RoiCropper, letterbox, unbox
@@ -101,8 +102,9 @@ class PretrainedDetector:
         """Build (or restore from ``cache_dir``) the per-category reference bank and memory bank."""
         cropper = RoiCropper(roi_path)
         train_ok = sorted({sha256_file(p): p for p in train_ok}.values(), key=str)
-        identity = {"images": [sha256_file(p) for p in train_ok], "roi": sha256_file(roi_path) if roi_path else None,
-                    "image_size": self.size, "reference_size": self.reference_size, "coreset": self.coreset, "seed": self.seed}
+        identity = {"images": [file_identity(p) for p in train_ok], "roi": sha256_file(roi_path) if roi_path else None,
+                    "image_size": self.size, "reference_size": self.reference_size, "coreset": self.coreset, "seed": self.seed,
+                    "networks": self.networks.cache_identity, "schema": 2}
         fingerprint = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:16]
         cache_dir.mkdir(parents=True, exist_ok=True)
         manifest_path, bank_path = cache_dir / "bank_manifest.json", cache_dir / "memory_bank.npy"
