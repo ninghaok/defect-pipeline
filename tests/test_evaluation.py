@@ -26,7 +26,7 @@ def test_fixed_test_cache_metrics_and_case_folders():
         cache = root / "cache" / "model-a"
         rows = score_fixed_test(items, predict, cache, "model-a")
         assert score_fixed_test(items, None, cache, "model-a") == rows and len(calls) == 4
-        assert rows[2]["iou"] == 0.5 and (cache / "visuals" / "00002" / "boxed.jpg").is_file()
+        assert rows[2]["iou"] == 0.5 and (Path(rows[2]["visuals_dir"]) / "boxed.jpg").is_file()
         strict = fixed_test_metrics(rows, .5); loose = fixed_test_metrics(rows, .2)
         assert strict["recall"] == .5 and strict["ok_false_positive_rate"] == 0.0 and strict["mean_iou_all_ng"] == .25
         assert loose["recall"] == 1.0 and loose["ok_false_positive_rate"] == .5 and loose["test_auroc"] == .75

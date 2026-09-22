@@ -33,12 +33,13 @@ if str(SRC) not in sys.path:
 import cv2
 import numpy as np
 
-from detected_pipeline.calibration import auroc, classification_metrics
+from detected_pipeline.evaluation import fixed_test_metrics
+from detected_pipeline.metric_support import segmentation_row
 from detected_pipeline.config import load_project_config, roi_mask_for
-from detected_pipeline.masks import external_gt, write_internal_from_external
+from detected_pipeline.masks import write_internal_from_external
 from detected_pipeline.roi import read_image, write_image
 from detected_pipeline.training.runner import run_yolo_seg_training, smoke_test_seg
-from detected_pipeline.training.seg_lifecycle import _roi, calibrate_seg, materialize
+from detected_pipeline.training.seg_lifecycle import calibrate_seg, materialize
 from detected_pipeline.util import atomic_write_json, sha256_file, utc_now
 
 EXT = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff"}
@@ -75,19 +76,18 @@ def internal_masks(ng: list[Path], mask_root: Path, out_dir: Path) -> list[tuple
 
 def evaluate(detector, items: list[tuple[Path, bool]], thresholds: dict, out: Path, roi_mask: Path | None, mask_root: Path) -> dict:
     """Report-only test pass; saves boxed/heatmap/mask per image under tp/fp/fn/tn."""
-    t, mt = thresholds["image_threshold"], thresholds["mask_conf_threshold"]; rows = []; cache: dict = {}
+    t, mt = thresholds["image_threshold"], thresholds["mask_conf_threshold"]; rows = []
     for case in ("tp", "fp", "fn", "tn"):
         (out / case).mkdir(parents=True, exist_ok=True)
     for index, (image_path, is_ng) in enumerate(items):
         image = read_image(image_path); score, confs, boxes, masks = detector.infer(image)
         predicted = score >= t; keep = (confs >= mt) if predicted else np.zeros(len(confs), bool)
         mask = detector.union(masks, keep, image.shape[:2])
-        iou = None; inter = union = 0
-        if is_ng:
-            gt = external_gt(find_mask(mask_root, image_path), image.shape[:2]); roi = _roi(roi_mask, image.shape[:2], cache)
-            if roi is not None:
-                gt &= roi
-            union = int((mask | gt).sum()); inter = int((mask & gt).sum()); iou = float(inter / union) if union else 0.0
+        metric_row = segmentation_row("NG" if is_ng else "OK", find_mask(mask_root, image_path) if is_ng else None,
+                                      mask, image.shape[:2], roi_mask)
+        if metric_row["label"] in ("EXCLUDED", "INVALID_GT"):
+            rows.append({"image": str(image_path), "score": score, **metric_row})
+            continue
         case = "tp" if is_ng and predicted else "fn" if is_ng else "fp" if predicted else "tn"
         folder = out / case / f"{index:05d}"; folder.mkdir(parents=True, exist_ok=True)
         boxed = image.copy()
@@ -100,14 +100,11 @@ def evaluate(detector, items: list[tuple[Path, bool]], thresholds: dict, out: Pa
         except OSError:
             shutil.copy2(image_path, folder / ("original" + image_path.suffix))
         rows.append({"image": str(image_path), "label": "NG" if is_ng else "OK", "prediction": "NG" if predicted else "OK", "case": case,
-                     "score": score, "n_instances": int(len(confs)), "n_kept": int(keep.sum()), "iou": iou})
+                     "score": score, "n_instances": int(len(confs)), "n_kept": int(keep.sum()), **metric_row})
         if (index + 1) % 20 == 0:
             print(f"TEST {index + 1}/{len(items)}", flush=True)
-    labels = [r["label"] == "NG" for r in rows]
-    result = classification_metrics(labels, [r["prediction"] == "NG" for r in rows])
-    result.update(test_auroc=auroc([r["score"] for r in rows], labels),
-                  mean_iou_all_ng=float(np.mean([r["iou"] for r in rows if r["iou"] is not None])) if any(labels) else None,
-                  image_threshold=t, mask_conf_threshold=mt, rows=rows)
+    result = fixed_test_metrics(rows, t)
+    result.update(mask_conf_threshold=mt, rows=rows)
     return result
 
 
@@ -179,8 +176,8 @@ def main() -> None:
         test_items = [(p, False) for p in test_ok] + [(p, True) for p in test_ng if p not in excluded]
         test = evaluate(detector, test_items, thresholds, out / "test", roi_mask, mask_root)
         atomic_write_json(out / "test_report.json", test)
-        print(f"test: recall {test['recall']:.3f} fpr {test['ok_false_positive_rate']:.3f} auroc {test['test_auroc']:.3f} "
-              f"iou {test['mean_iou_all_ng']}", flush=True)
+        print(f"test: recall {test['recall']} fpr {test['ok_false_positive_rate']} auroc {test['test_auroc']} "
+              f"micro IoU {test['iou_micro']}", flush=True)
     summary = {"category": a.category, "model_version": f"{a.category}-seg-standalone-{utc_now()[:10]}-{sha256_file(checkpoint)[:8]}",
                "checkpoint": str(checkpoint), "sha256": sha256_file(checkpoint), "thresholds": thresholds,
                "smoke_test": smoke_test_seg(checkpoint, cal_items[0][0], training.get("inference", {}), roi_mask),

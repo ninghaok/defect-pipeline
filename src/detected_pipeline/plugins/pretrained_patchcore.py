@@ -16,6 +16,7 @@ import cv2
 import numpy as np
 
 from detected_pipeline.calibration import choose_image_threshold, quantile_higher
+from detected_pipeline.cache_identity import file_identity, fingerprint
 from detected_pipeline.contracts import Decision, InferenceContext, PretrainedPrediction
 from detected_pipeline.roi import read_image, write_image
 from detected_pipeline.util import atomic_write_json, sha256_file, utc_now
@@ -56,21 +57,28 @@ class PretrainedPatchCorePlugin:
         self.cal_ok[category] = list(calibration_ok)
         scores_path = cache / "calibration_ok_scores.json"
         expected = [sha256_file(p) for p in calibration_ok]
+        calibration_key = fingerprint({"bank": state["manifest"]["fingerprint"], "images": expected,
+                                       "top_fraction": self.detector.top_fraction, "segmentation": self.segmentation,
+                                       "rules": self.rules})
         cached = json.loads(scores_path.read_text(encoding="utf-8")) if scores_path.exists() else None
-        if not cached or cached.get("sha256") != expected or cached.get("fingerprint") != state["manifest"]["fingerprint"]:
+        if not cached or cached.get("calibration_key") != calibration_key:
             scores = [self.detector.score_image(category, p) for p in calibration_ok]
             pixels = self.detector.ok_pixel_sample(category, calibration_ok)
-            cached = {"category": category, "fingerprint": state["manifest"]["fingerprint"], "sha256": expected,
+            cached = {"category": category, "fingerprint": state["manifest"]["fingerprint"], "sha256": expected, "calibration_key": calibration_key,
                       "images": [str(p) for p in calibration_ok], "scores": scores,
                       "pixel_threshold": quantile_higher(pixels, float(self.segmentation.get("pixel_quantile", 0.997)))}
             atomic_write_json(scores_path, cached)
         state["ok_scores"] = [float(s) for s in cached["scores"]]
         state["pixel_threshold"] = float(cached["pixel_threshold"])
+        state["calibration_key"] = calibration_key
         threshold_path = cache / "thresholds.json"
-        if threshold_path.exists():
-            self.thresholds[category] = json.loads(threshold_path.read_text(encoding="utf-8"))
+        previous = json.loads(threshold_path.read_text(encoding="utf-8")) if threshold_path.exists() else None
+        ng_identity = [file_identity(p) for p in (previous or {}).get("ng_images", [])]
+        if previous and previous.get("calibration_key") == calibration_key and previous.get("ng_identity") == ng_identity:
+            self.thresholds[category] = previous
         else:
-            self.calibrate(category, [])
+            # Re-score the same confirmed calibration NG when model/config changes.
+            self.calibrate(category, [Path(p) for p in (previous or {}).get("ng_images", [])])
         return state
 
     def calibrate(self, category: str, confirmed_ng: list[Path]) -> dict[str, Any]:
@@ -78,8 +86,9 @@ class PretrainedPatchCorePlugin:
         state = self.detector.categories[category]
         ng_scores = [self.detector.score_image(category, p) for p in confirmed_ng]
         result = choose_image_threshold(state["ok_scores"], ng_scores, self.rules, category)
-        result.update({"image_threshold": result["threshold"], "pixel_threshold": state["pixel_threshold"],
-                       "ng_images": [str(p) for p in confirmed_ng], "ng_scores": ng_scores, "calibrated_at": utc_now()})
+        result.update({"image_threshold": result["threshold"], "pixel_threshold": state["pixel_threshold"], "calibration_key": state["calibration_key"],
+                       "ng_images": [str(p) for p in confirmed_ng], "ng_identity": [file_identity(p) for p in confirmed_ng],
+                       "ng_scores": ng_scores, "calibrated_at": utc_now()})
         previous = self.thresholds.get(category, {})
         result["history"] = (previous.get("history") or []) + [{k: previous[k] for k in ("rule", "image_threshold", "calibration_ng", "calibrated_at") if k in previous}] if previous else []
         self.thresholds[category] = result

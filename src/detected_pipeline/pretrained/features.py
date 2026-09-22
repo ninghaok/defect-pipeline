@@ -15,6 +15,7 @@ if str(VENDOR) not in sys.path:
     sys.path.insert(0, str(VENDOR))
 
 from detected_pipeline.roi import read_image  # noqa: E402
+from detected_pipeline.cache_identity import file_identity
 
 FILL_BGR = np.asarray((104, 116, 123), dtype=np.uint8)   # ImageNet mean, outside-ROI fill (matches the validated experiment)
 
@@ -80,6 +81,7 @@ class FeatureNetworks:
         from models.dino import DinoModel
         from models.projector import MultiScaleAttentionProjector
         self.device = device
+        self.cache_identity = {"backbone": backbone, "dino": file_identity(dino_weight), "angle": file_identity(angle_weight)}
         self.encoder = DinoModel(backbone, device=device, weight_path=str(dino_weight)).to(device).eval()
         self.projector = MultiScaleAttentionProjector(self.encoder.feature_dimensions, device=device)
         state = torch.load(angle_weight, map_location="cpu", weights_only=False)

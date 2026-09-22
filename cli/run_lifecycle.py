@@ -23,12 +23,13 @@ SRC = PROJECT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from detected_pipeline.calibration import classification_metrics
+from detected_pipeline.cache_identity import fingerprint
 from detected_pipeline.config import load_project_config, roi_mask_for
 from detected_pipeline.contracts import Decision, InferenceContext, ReviewRecord
 from detected_pipeline.evaluation import fixed_test_metrics, score_fixed_test, write_test_report
+from detected_pipeline.experiment_observation import batch_snapshot
 from detected_pipeline.feedback import FeedbackStore
-from detected_pipeline.masks import external_gt, internal_mask
+from detected_pipeline.online_metrics import reviewed_metrics
 from detected_pipeline.plugins import load_pretrained_plugin
 from detected_pipeline.plugins.yolo_supervised import YoloFeedbackAdapter, YoloSegDetector
 from detected_pipeline.registry import ModelRegistry
@@ -38,23 +39,7 @@ from detected_pipeline.training.runner import smoke_test_seg
 from detected_pipeline.training.seg_lifecycle import compare_models, confirmed_rows, next_milestone, train_candidate
 from detected_pipeline.util import atomic_write_json, sha256_file, utc_now
 
-KEYS = ("recall", "ok_false_positive_rate", "test_auroc", "mean_iou_all_ng")
-
-
-def metrics(rows, key):
-    rows = [r for r in rows if r.get("truth") in ("OK", "NG") and r.get(key)]
-    return classification_metrics([r["truth"] == "NG" for r in rows], [r[key] == "NG" for r in rows])
-
-
-def segmentation_metrics(rows, mask_key):
-    import numpy as np
-    tp = fp = fn = images = 0
-    for row in rows:
-        if row.get("truth") != "NG" or not row.get("gt_mask") or not row.get(mask_key):
-            continue
-        gt = external_gt(row["gt_mask"]); pred = internal_mask(row[mask_key], gt.shape)
-        tp += int(np.logical_and(gt, pred).sum()); fp += int(np.logical_and(~gt, pred).sum()); fn += int(np.logical_and(gt, ~pred).sum()); images += 1
-    return {"images": images, "dice": 2 * tp / (2 * tp + fp + fn) if 2 * tp + fp + fn else None, "iou": tp / (tp + fp + fn) if tp + fp + fn else None}
+KEYS = ("recall", "ok_false_positive_rate", "test_auroc", "iou_micro", "mean_iou_all_ng")
 
 
 def per_category(value, category, default):
@@ -127,6 +112,7 @@ def main():
         "category": category, "reviewed_batches": 0, "last_milestone": 0, "last_pretrained_calibration_ng": -1,
         "candidate": None, "shadow_rows": [], "shadow_batches": 0, "history": []}
     reference_ok, bank_ok, calibration_ok, fixed_test, stream_mode = initialization(args.initialization_manifest, category)
+    calibration_sha = {sha256_file(path) for path in calibration_ok}
     for image in bank_ok:   # memory-bank OK are also permanent YOLO training OK (never stream, never calibration)
         store.seed_confirmed_ok_for_training(image, category, f"{category}-{sha256_file(image)[:16]}")
 
@@ -169,7 +155,11 @@ def main():
     def test_pretrained(role):
         if not fixed_test:
             return None
-        key = "pretrained-" + pretrained.detector.categories[category]["manifest"]["fingerprint"]; cache = test_cache / key
+        key = "pretrained-" + fingerprint({"bank": pretrained.detector.categories[category]["manifest"]["fingerprint"],
+                                           "segmentation": pretrained.segmentation,
+                                           "pixel_threshold": pretrained.thresholds[category]["pixel_threshold"],
+                                           "top_fraction": pretrained.detector.top_fraction})
+        cache = test_cache / key
         rows = score_fixed_test(fixed_test, pretrained_predict, cache, key, roi_mask, visuals, lambda m: print(m, flush=True))
         thresholds = pretrained.thresholds[category]
         write_test_report(workspace, category, key, role, rows, float(thresholds["image_threshold"]), cache,
@@ -179,12 +169,18 @@ def main():
     def test_yolo(model, role):
         if not fixed_test:
             return None
-        key = "yolo-" + sha256_file(Path(model["checkpoint"]))[:16]; cache = test_cache / key
-        if not (cache / "scores.json").exists():
-            detector = YoloSegDetector(Path(model["checkpoint"]), config["training"].get("inference", {}), roi_mask)
-            score_fixed_test(fixed_test, yolo_predict_fn(detector, float(model["thresholds"]["mask_conf_threshold"])), cache, key, roi_mask, visuals, lambda m: print(m, flush=True))
-            del detector
-        rows = score_fixed_test(fixed_test, None, cache, key, roi_mask, visuals)
+        settings = config["training"].get("inference", {})
+        key = "yolo-" + fingerprint({"checkpoint": sha256_file(Path(model["checkpoint"])), "inference": settings,
+                                     "mask_conf_threshold": model["thresholds"]["mask_conf_threshold"], "schema": 2})
+        cache = test_cache / key
+        detector = None
+        def predict(path):
+            nonlocal detector
+            if detector is None:
+                detector = YoloSegDetector(Path(model["checkpoint"]), settings, roi_mask)
+            return yolo_predict_fn(detector, float(model["thresholds"]["mask_conf_threshold"]))(path)
+        rows = score_fixed_test(fixed_test, predict, cache, key, roi_mask, visuals, lambda m: print(m, flush=True))
+        del detector
         write_test_report(workspace, category, model["model_version"], role, rows, float(model["thresholds"]["image_threshold"]), cache)
         return fixed_test_metrics(rows, float(model["thresholds"]["image_threshold"]))
 
@@ -232,7 +228,8 @@ def main():
                     for im, pr, sh in pending]
             def review_index(i):
                 image, prediction, _ = pending[i]; record = review_record(prediction, image); store.apply_review(image, record)
-                rows[i].update(truth=record.reviewed_decision.value, review="reviewed", gt_mask=record.mask_path); return record.reviewed_decision == Decision.NG
+                rows[i].update(truth=record.reviewed_decision.value, review="reviewed", gt_mask=record.mask_path,
+                               label_source=record.label_source); return record.reviewed_decision == Decision.NG
             ng_indices = [i for i, (_, pr, _) in enumerate(pending) if pr.final_decision == Decision.NG]
             ok_indices = [i for i, (_, pr, _) in enumerate(pending) if pr.final_decision == Decision.OK]
             for i in ng_indices:
@@ -252,13 +249,17 @@ def main():
                 for i in ok_indices:
                     review_index(i)
             state["reviewed_batches"] += 1
+            evaluated = reviewed_metrics(rows, roi_mask=roi_mask)
             report = {"at": utc_now(), "batch": state["reviewed_batches"], "count": len(rows), "reviewed": sum(r["review"] == "reviewed" for r in rows),
                       "official_model": production["model_version"] if official is not pretrained else "pretrained",
-                      "official": metrics(rows, "official"), "official_segmentation": segmentation_metrics(rows, "official_mask"),
+                      "official": evaluated["classification"], "official_segmentation": evaluated["segmentation"],
                       "review_sampling": sampling_stats, "rows": rows}
             if candidate is not None:
                 shadow_rows = [r for r in rows if "shadow" in r and r["review"] == "reviewed"]
-                report["shadow"] = metrics(shadow_rows, "shadow"); report["shadow_model"] = state["candidate"]["model_version"]
+                shadow_evaluated = reviewed_metrics(shadow_rows, "shadow", "shadow_mask", roi_mask)
+                report["shadow"] = shadow_evaluated["classification"]
+                report["shadow_segmentation"] = shadow_evaluated["segmentation"]
+                report["shadow_model"] = state["candidate"]["model_version"]
                 report["disagreements"] = [r["sample_id"] for r in shadow_rows if r["shadow"] != r["official"]]
                 state["shadow_rows"].extend({k: r[k] for k in ("sample_id", "truth", "official", "shadow")} for r in shadow_rows)
                 state["shadow_batches"] += 1
@@ -335,6 +336,8 @@ def main():
                 if official is not pretrained:
                     official = yolo_adapter(production, workspace, config, "production_yolo", roi_mask)
                 atomic_write_json(state_path, state)
+            report["end_of_batch"] = batch_snapshot(workspace, category, state, config, calibration_sha, roi_mask)
+            atomic_write_json(workspace / "batch_reports" / category / f"batch_{state['reviewed_batches']:04d}.json", report)
             print(json.dumps({"batch": state["reviewed_batches"], "processed": len(pending), "reviewed": report["reviewed"], "labeled_ng": labeled_ng,
                               "official": production["model_version"] if official is not pretrained else "pretrained",
                               "shadow": state["candidate"]["model_version"] if state.get("candidate") else None, "last_milestone": state["last_milestone"]}, ensure_ascii=False), flush=True)
