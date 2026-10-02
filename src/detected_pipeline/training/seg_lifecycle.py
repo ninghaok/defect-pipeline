@@ -23,7 +23,7 @@ from typing import Any
 import cv2
 import numpy as np
 
-from detected_pipeline.calibration import classification_metrics, mask_conf_threshold, recall_first
+from detected_pipeline.calibration import mask_conf_threshold, recall_first
 from detected_pipeline.masks import internal_mask
 from detected_pipeline.roi import read_image, write_image
 from detected_pipeline.util import atomic_write_json, sha256_file, utc_now
@@ -260,17 +260,3 @@ def train_candidate(workspace: Path, category: str, milestone: int, config: dict
     atomic_write_json(summary_path, summary)
     shutil.rmtree(dataset_root, ignore_errors=True)   # generated links only; source data untouched
     return summary
-
-
-def compare_models(official_scores: list[float], official_threshold: float, candidate_scores: list[float],
-                   candidate_threshold: float, labels: list[bool], gate: dict[str, Any]) -> dict[str, Any]:
-    """Offline promotion gate on the calibration set (recall-first): the candidate must not add misses and
-    must not raise the OK false-positive rate; it must improve at least one of the two meaningfully."""
-    old = classification_metrics(labels, [s >= official_threshold for s in official_scores])
-    new = classification_metrics(labels, [s >= candidate_threshold for s in candidate_scores])
-    max_fpr_increase = float(gate.get("max_fpr_increase", 0.0)); min_fpr_gain = float(gate.get("min_fpr_reduction_for_equal_fn", 0.01))
-    checks = {"no_extra_misses": new["fn"] <= old["fn"],
-              "fpr_not_worse": new["ok_false_positive_rate"] <= old["ok_false_positive_rate"] + max_fpr_increase,
-              "real_gain": new["fn"] < old["fn"] or new["ok_false_positive_rate"] <= old["ok_false_positive_rate"] - min_fpr_gain}
-    return {"decision": "promote" if all(checks.values()) else "reject", "checks": checks, "official": old, "candidate": new,
-            "official_threshold": official_threshold, "candidate_threshold": candidate_threshold, "compared_at": utc_now()}

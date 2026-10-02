@@ -9,7 +9,8 @@ from detected_pipeline.roi import read_image
 VERIFIED_SOURCES = {"human_review", "folder_ground_truth"}
 
 
-def reviewed_metrics(rows, decision_key="official", mask_key="official_mask", roi_mask=None):
+def reviewed_metric_rows(rows, decision_key="official", mask_key="official_mask", roi_mask=None):
+    """Freeze verified per-image counts for reporting and cross-batch promotion."""
     selected = [r for r in rows if r.get("truth") in ("OK", "NG")
                 and r.get("label_source") in VERIFIED_SOURCES and r.get(decision_key) in ("OK", "NG")]
     evaluated = []
@@ -24,13 +25,22 @@ def reviewed_metrics(rows, decision_key="official", mask_key="official_mask", ro
         if predicted_ng and result["gt_status"] == "valid" and not available:
             result["gt_status"] = "missing_prediction"
         result["predicted_ng"] = predicted_ng
+        result["sample_id"] = row.get("sample_id", row["image"])
         evaluated.append(result)
+    return evaluated
+
+
+def aggregate_reviewed_metrics(evaluated):
     used = [r for r in evaluated if r["label"] in ("OK", "NG")]
     classification = classification_metrics([r["label"] == "NG" for r in used], [r["predicted_ng"] for r in used])
-    classification.update(scope="reviewed_online_subset", metrics_schema=2, count=len(used), verified_count=len(selected),
+    classification.update(scope="reviewed_online_subset", metrics_schema=2, count=len(used), verified_count=len(evaluated),
                           excluded_outside_roi=sum(r["label"] == "EXCLUDED" for r in evaluated),
                           excluded_invalid_gt=sum(r["label"] == "INVALID_GT" for r in evaluated))
     segmentation = aggregate_segmentation(evaluated, [r["predicted_ng"] for r in evaluated])
     segmentation.update(scope="reviewed_online_subset", primary_segmentation_metric="iou_micro",
                         images=segmentation["segmentation_valid_ng"], iou=segmentation["iou_micro"], dice=segmentation["dice_micro"])
     return {"classification": classification, "segmentation": segmentation}
+
+
+def reviewed_metrics(rows, decision_key="official", mask_key="official_mask", roi_mask=None):
+    return aggregate_reviewed_metrics(reviewed_metric_rows(rows, decision_key, mask_key, roi_mask))
