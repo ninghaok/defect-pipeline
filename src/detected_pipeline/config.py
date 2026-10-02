@@ -21,6 +21,10 @@ def load_project_config(project_root: Path) -> dict[str, Any]:
     pipeline = load_yaml(configs / "pipeline.yaml")
     pipeline["categories"] = load_yaml(configs / "categories.yaml")["categories"]
     pipeline["training"] = load_yaml(configs / "training.yaml")
+    synthetic_path = Path(os.environ.get("PIPELINE_SYNTHETIC_CONFIG", str(configs / "synthetic.yaml")))
+    pipeline["synthetic"] = load_yaml(synthetic_path) if synthetic_path.is_file() else {"enabled": False}
+    if os.environ.get("PIPELINE_SYNTHETIC_CONFIG") and not synthetic_path.is_file():
+        raise FileNotFoundError(synthetic_path)
     pipeline["roi"] = load_yaml(configs / "roi.yaml").get("categories", {}) if (configs / "roi.yaml").is_file() else {}
     pipeline["project_root"] = str(project_root)
     pipeline["pretrained_config"] = str(configs / pipeline.get("pretrained_config", "pretrained.yaml"))

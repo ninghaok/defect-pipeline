@@ -30,10 +30,13 @@ def test_full_stream_export_counts_hidden_miss_without_mutating_batch(tmp_path):
     before = path.read_bytes()
     result = module.export_category(ws, "cat", {}, tmp_path / "summary")
     saved = json.loads((tmp_path / "summary" / "cat_table.json").read_text(encoding="utf-8"))
-    assert result["completed_rows"] == 1 and len(saved["headers"]) == 15
+    assert result["completed_rows"] == 1 and len(saved["headers"]) == 34
+    assert saved["headers"][14] == "YOLO独立评测micro IoU"
     row = saved["rows"][0]
     assert row["在线Recall"] == .5 and row["在线micro IoU"] == 1 / 101
     assert row["实际的输入OK/NG数"] == "0/2" and row["需要人工打标的数量"] == 1
+    assert row["在线漏检数"] == 1 and row["在线误报数"] == 0
+    assert row["离线切换判定"] == "未按新规则评估"
     assert path.read_bytes() == before
 
 

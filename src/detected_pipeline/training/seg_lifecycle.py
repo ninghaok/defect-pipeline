@@ -212,7 +212,7 @@ def next_milestone(labeled_ng: int, last_milestone: int, life: dict[str, Any]) -
 
 
 def train_candidate(workspace: Path, category: str, milestone: int, config: dict[str, Any],
-                    calibration_ok: list[Path], roi_mask: Path | None) -> dict[str, Any]:
+                    calibration_ok: list[Path], roi_mask: Path | None, *, augmentation_context=None) -> dict[str, Any]:
     """Train one milestone candidate and calibrate it; idempotent per (milestone, data fingerprint)."""
     life = config["lifecycle"]; training = dict(config["training"]); seed = int(training["seed"])
     ng_rows = confirmed_rows(workspace, category, "NG")
@@ -229,17 +229,38 @@ def train_candidate(workspace: Path, category: str, milestone: int, config: dict
     identity = {"train_ng": sorted(r["sha256"] for r in train_ng), "cal_ng": sorted(r["sha256"] for r in cal_ng),
                 "train_ok": sorted(r["sha256"] for r in ok_rows), "cal_ok": sorted(cal_sha), "training": training,
                 "thresholds": life.get("yolo_thresholds", {})}
+    synthetic_items, augmentation = [], {"enabled": False, "selected_count": 0}
+    if config.get("synthetic", {}).get("enabled", False):
+        from detected_pipeline.augmentation.bounded import prepare
+        synthetic_items, augmentation = prepare(workspace, category, milestone, config["synthetic"],
+                                                train_ng, cal_ng, ok_rows, calibration_ok, roi_mask, augmentation_context)
+        identity["synthetic"] = augmentation
     fingerprint = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:12]
     run_root = workspace / "model_registry" / category / "milestones" / f"v{milestone}_{fingerprint}"
     summary_path = run_root / "summary.json"
     if summary_path.exists():
         return json.loads(summary_path.read_text(encoding="utf-8"))
     train_items = [(Path(r["copy_path"]), Path(r["mask"])) for r in train_ng] + [(Path(r["copy_path"]), None) for r in ok_rows]
+    train_items += synthetic_items
     cal_items = [(Path(p), None) for p in calibration_ok] + [(Path(r["copy_path"]), Path(r["mask"])) for r in cal_ng]
     dataset_root = run_root / "dataset"
     if dataset_root.exists():
         shutil.rmtree(dataset_root)
     yaml_path, stats = materialize(dataset_root, train_items, cal_items, roi_mask)
+    # Survives dataset cleanup; includes the exact materialized YOLO labels and source roles.
+    excluded = {Path(e["image"]) for e in stats["excluded"]}
+    records = []
+    for split, items in (("train", train_items), ("val", cal_items)):
+        for index, (image, mask) in enumerate(items):
+            role = ("synthetic_ng" if (image, mask) in synthetic_items else
+                    "real_ng" if mask else "pseudo_ok" if split == "train" and any(
+                        r["copy_path"] == str(image) and r.get("label_source") == "sampling_pseudo_ok" for r in ok_rows) else "real_ok")
+            labels = dataset_root / "labels" / split / f"{index:05d}.txt"
+            records.append({"split": split, "role": role, "image": str(image), "image_sha256": sha256_file(image),
+                            "mask": str(mask) if mask else None, "mask_sha256": sha256_file(mask) if mask else None,
+                            "excluded_outside_roi": image in excluded,
+                            "yolo_labels": labels.read_text() if labels.exists() else None})
+    atomic_write_json(run_root / "training_manifest.json", {"records": records, "augmentation": augmentation})
     started = time.perf_counter()
     training["base_checkpoint"] = str(training["base_checkpoint"]); training["patience"] = 0
     checkpoint = run_yolo_seg_training(yaml_path, run_root / "model", training)
@@ -256,6 +277,7 @@ def train_candidate(workspace: Path, category: str, milestone: int, config: dict
                "calibration_records": calibration["records"],
                "counts": {"train_ng": len(train_ng), "train_ok": len(ok_rows), "train_pseudo_ok": int(sum(r.get("label_source") == "sampling_pseudo_ok" for r in ok_rows)), "calibration_ng": len(cal_ng),
                           "calibration_ok": len(calibration_ok), "excluded_outside_roi": len(stats["excluded"])},
+               "augmentation": augmentation, "training_manifest": str(run_root / "training_manifest.json"),
                "dataset_stats": stats, "training_seconds": training_seconds, "created_at": utc_now()}
     atomic_write_json(summary_path, summary)
     shutil.rmtree(dataset_root, ignore_errors=True)   # generated links only; source data untouched

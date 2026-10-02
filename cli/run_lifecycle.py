@@ -124,7 +124,19 @@ def main():
     paths = random_stream(paths, stream_seed) if stream_mode == "random" else evenly_mixed_stream(paths, batch_size, stream_seed)
     paths = [x for x in paths if not store.contains(category, sha256_file(x))]
 
-    pretrained = load_pretrained_plugin(Path(config["pretrained_config"]), PROJECT)
+    augmentation_context = None
+    if config.get("synthetic", {}).get("enabled", False):
+        from detected_pipeline.augmentation.bounded import pixel_digest, validate_policy
+        from detected_pipeline.augmentation.seas_contract import ReloadablePretrained
+        validate_policy(config["synthetic"])
+        pretrained = ReloadablePretrained(lambda: load_pretrained_plugin(Path(config["pretrained_config"]), PROJECT))
+        excluded_images = reference_ok + calibration_ok + [Path(r["image"]) for r in fixed_test]
+        augmentation_context = {"initial_bank_sha": {sha256_file(p) for p in bank_ok},
+                                "forbidden_sha": {sha256_file(p) for p in excluded_images},
+                                "forbidden_pixel_sha": {pixel_digest(p) for p in excluded_images},
+                                "release": pretrained.release_for_generation}
+    else:
+        pretrained = load_pretrained_plugin(Path(config["pretrained_config"]), PROJECT)
     pretrained.prepare_category(category, reference_ok + bank_ok, calibration_ok)
     test_cache = workspace / "test_cache" / category
 
@@ -321,7 +333,8 @@ def main():
                     superseded = json.loads(meta_path.read_text(encoding="utf-8")); superseded["status"] = "superseded"; atomic_write_json(meta_path, superseded)
                     state["history"].append({"event": "superseded", "at": utc_now(), "model": state["candidate"]["model_version"]})
                     state["candidate"] = None; state["shadow_rows"] = []; state["shadow_batches"] = 0
-                summary = train_candidate(workspace, category, milestone, config, calibration_ok, roi_mask)
+                kwargs = {"augmentation_context": augmentation_context} if augmentation_context is not None else {}
+                summary = train_candidate(workspace, category, milestone, config, calibration_ok, roi_mask, **kwargs)
                 smoke_image = Path(summary["calibration_records"][0]["image"])
                 metadata = registry.register_candidate(category, summary["model_version"], Path(summary["checkpoint"]), f"milestone-v{milestone}",
                                                        summary["thresholds"], lambda path: smoke_test_seg(path, smoke_image, config["training"].get("inference", {}), roi_mask))

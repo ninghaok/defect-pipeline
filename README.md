@@ -53,3 +53,6 @@ python .\cli\check_local_installation.py
 - 校准 OK（200 张）永远不进 YOLO 训练；NG 一经确认即按哈希永久分到训练或校准。
 - 训练固定 100 epoch 不早停，发布 `last.pt`；数据集 test 目录是固定测试集，每个进入产线的模型都在其上评测，从不参与训练、标定或选择。
 - 四类的数据、阈值、模型完全隔离。
+# 可选的伪缺陷训练增强
+
+默认关闭的限额增强已接入候选模型训练，支持独立生成环境、比例和次数上限、面积匹配、重启审计及逐图溯源。配置、隔离规则和对照实验说明见 [SYNTHETIC_AUGMENTATION.md](docs/SYNTHETIC_AUGMENTATION.md)。
