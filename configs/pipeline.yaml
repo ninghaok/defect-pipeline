@@ -52,6 +52,5 @@ lifecycle:
   yolo_thresholds:
     target_recall: {default: 0.95, wa_yuan_detection: 0.99}
     max_fpr: 0.2
-  promotion:
-    max_fpr_increase: 0.0
-    min_fpr_reduction_for_equal_fn: 0.01
+  # Both gates: recall/FPR/micro IoU must all be non-worse, with at least one strict improvement.
+  # No minimum FPR reduction; missing metrics cannot pass (see detected_pipeline.promotion).

@@ -29,14 +29,15 @@ from detected_pipeline.contracts import Decision, InferenceContext, ReviewRecord
 from detected_pipeline.evaluation import fixed_test_metrics, score_fixed_test, write_test_report
 from detected_pipeline.experiment_observation import batch_snapshot
 from detected_pipeline.feedback import FeedbackStore
-from detected_pipeline.online_metrics import reviewed_metrics
+from detected_pipeline.online_metrics import aggregate_reviewed_metrics, reviewed_metric_rows, reviewed_metrics
+from detected_pipeline.promotion import PROMOTION_RULE, compare_models, score_calibration
 from detected_pipeline.plugins import load_pretrained_plugin
 from detected_pipeline.plugins.yolo_supervised import YoloFeedbackAdapter, YoloSegDetector
 from detected_pipeline.registry import ModelRegistry
 from detected_pipeline.review import build_review_provider, run_sampled_review
 from detected_pipeline.roi import read_image
 from detected_pipeline.training.runner import smoke_test_seg
-from detected_pipeline.training.seg_lifecycle import compare_models, confirmed_rows, next_milestone, train_candidate
+from detected_pipeline.training.seg_lifecycle import confirmed_rows, next_milestone, train_candidate
 from detected_pipeline.util import atomic_write_json, sha256_file, utc_now
 
 KEYS = ("recall", "ok_false_positive_rate", "test_auroc", "iou_micro", "mean_iou_all_ng")
@@ -256,24 +257,36 @@ def main():
                       "review_sampling": sampling_stats, "rows": rows}
             if candidate is not None:
                 shadow_rows = [r for r in rows if "shadow" in r and r["review"] == "reviewed"]
-                shadow_evaluated = reviewed_metrics(shadow_rows, "shadow", "shadow_mask", roi_mask)
+                official_metric_rows = reviewed_metric_rows(shadow_rows, roi_mask=roi_mask)
+                shadow_metric_rows = reviewed_metric_rows(shadow_rows, "shadow", "shadow_mask", roi_mask)
+                shadow_evaluated = aggregate_reviewed_metrics(shadow_metric_rows)
                 report["shadow"] = shadow_evaluated["classification"]
                 report["shadow_segmentation"] = shadow_evaluated["segmentation"]
                 report["shadow_model"] = state["candidate"]["model_version"]
                 report["disagreements"] = [r["sample_id"] for r in shadow_rows if r["shadow"] != r["official"]]
-                state["shadow_rows"].extend({k: r[k] for k in ("sample_id", "truth", "official", "shadow")} for r in shadow_rows)
+                # Persist counts at inference time: do not average batch IoUs or re-read mutable masks on resume.
+                if len(official_metric_rows) != len(shadow_metric_rows):
+                    raise ValueError("Unpaired shadow metric rows")
+                for old_row, new_row in zip(official_metric_rows, shadow_metric_rows):
+                    if old_row["sample_id"] != new_row["sample_id"]:
+                        raise ValueError("Unpaired shadow metric rows")
+                    state["shadow_rows"].append({"sample_id": old_row["sample_id"], "truth": old_row["label"],
+                                                 "official_metrics": old_row, "shadow_metrics": new_row})
                 state["shadow_batches"] += 1
             atomic_write_json(workspace / "batch_reports" / category / f"batch_{state['reviewed_batches']:04d}.json", report)
             atomic_write_json(state_path, state)
 
             # ---- shadow judgement (same gate as offline, on reviewed shadow rows)
             if candidate is not None:
-                shadow_ng = sum(r["truth"] == "NG" for r in state["shadow_rows"])
+                shadow_ng = sum(r["truth"] == "NG" and r.get("official_metrics", {}).get("gt_status") == "valid"
+                                for r in state["shadow_rows"])
                 if shadow_ng >= int(life.get("shadow_min_ng", 10)) or state["shadow_batches"] >= int(life.get("shadow_max_batches", 5)):
-                    labels = [r["truth"] == "NG" for r in state["shadow_rows"]]
-                    verdict = compare_models([1.0 if r["official"] == "NG" else 0.0 for r in state["shadow_rows"]], 0.5,
-                                             [1.0 if r["shadow"] == "NG" else 0.0 for r in state["shadow_rows"]], 0.5, labels, life.get("promotion", {}))
-                    verdict.update(stage="shadow", reviewed=len(labels), ng=shadow_ng, batches=state["shadow_batches"], model_version=state["candidate"]["model_version"])
+                    verdict = compare_models([r.get("official_metrics", {}) for r in state["shadow_rows"]],
+                                             [r.get("shadow_metrics", {}) for r in state["shadow_rows"]])
+                    if state["candidate"].get("offline_comparison", {}).get("rule") != PROMOTION_RULE:
+                        verdict.update(decision="reject", reason="legacy_offline_gate_requires_reevaluation")
+                        verdict["checks"]["offline_rule_current"] = False
+                    verdict.update(stage="shadow", reviewed=len(state["shadow_rows"]), ng=shadow_ng, batches=state["shadow_batches"], model_version=state["candidate"]["model_version"])
                     atomic_write_json(workspace / "promotion_reports" / category / f"shadow_{state['candidate']['model_version']}.json", verdict)
                     meta_path = registry.root / category / "versions" / state["candidate"]["model_version"] / "model.json"
                     metadata = json.loads(meta_path.read_text(encoding="utf-8")); metadata["shadow_comparison"] = verdict
@@ -313,15 +326,26 @@ def main():
                 metadata = registry.register_candidate(category, summary["model_version"], Path(summary["checkpoint"]), f"milestone-v{milestone}",
                                                        summary["thresholds"], lambda path: smoke_test_seg(path, smoke_image, config["training"].get("inference", {}), roi_mask))
                 metadata.update({"milestone": milestone, "calibration": summary["calibration"], "counts": summary["counts"]})
-                cal_items = [(Path(r["image"]), r["label"] == "NG") for r in summary["calibration_records"]]
-                candidate_scores = [float(r["score"]) for r in summary["calibration_records"]]
+                # Use only the candidate's calibration cohort and internal GT masks, never fixed-test metrics.
+                ng_masks = {r["copy_path"]: Path(r["mask"]) for r in confirmed_rows(workspace, category, "NG")}
+                cal_items = [(Path(r["image"]), ng_masks[r["image"]] if r["label"] == "NG" else None)
+                             for r in summary["calibration_records"]]
+                candidate_threshold = float(summary["thresholds"]["image_threshold"])
+                scorer = YoloSegDetector(Path(summary["checkpoint"]), config["training"].get("inference", {}), roi_mask)
+                candidate_rows = score_calibration(cal_items, yolo_predict_fn(scorer, float(summary["thresholds"]["mask_conf_threshold"])),
+                                                   candidate_threshold, roi_mask)
+                del scorer
                 if official is pretrained:
-                    official_scores = [pretrained.score(category, path) for path, _ in cal_items]; official_threshold = float(pretrained.thresholds[category]["image_threshold"])
+                    official_threshold = float(pretrained.thresholds[category]["image_threshold"])
+                    official_rows = score_calibration(cal_items, pretrained_predict, official_threshold, roi_mask)
                 else:
                     scorer = YoloSegDetector(Path(production["checkpoint"]), config["training"].get("inference", {}), roi_mask)
-                    official_scores = [scorer.score(path) for path, _ in cal_items]; official_threshold = float(production["thresholds"]["image_threshold"]); del scorer
-                comparison = compare_models(official_scores, official_threshold, candidate_scores, float(summary["thresholds"]["image_threshold"]),
-                                            [is_ng for _, is_ng in cal_items], life.get("promotion", {}))
+                    official_threshold = float(production["thresholds"]["image_threshold"])
+                    official_rows = score_calibration(cal_items, yolo_predict_fn(scorer, float(production["thresholds"]["mask_conf_threshold"])),
+                                                      official_threshold, roi_mask)
+                    del scorer
+                comparison = compare_models(official_rows, candidate_rows)
+                comparison.update(official_threshold=official_threshold, candidate_threshold=candidate_threshold)
                 comparison["stage"] = "offline"; metadata["offline_comparison"] = comparison
                 metadata["status"] = "shadow_candidate" if comparison["decision"] == "promote" else "rejected_offline"
                 metadata["fixed_test"] = test_yolo(metadata, "candidate")

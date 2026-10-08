@@ -6,7 +6,7 @@ import numpy as np
 
 from detected_pipeline.feedback import FeedbackStore
 from detected_pipeline.roi import write_image
-from detected_pipeline.training.seg_lifecycle import (assign_ng_splits, compare_models, materialize, next_milestone,
+from detected_pipeline.training.seg_lifecycle import (assign_ng_splits, materialize, next_milestone,
                                                      polygons, select_training_ok)
 
 CATEGORIES = ["qiumian_fupai", "qiumian_xiepai", "di_mian_detection", "wa_yuan_detection"]
@@ -52,17 +52,6 @@ class LifecycleTests(unittest.TestCase):
             yaml_path, stats = materialize(root / "ds", [(root / "ng.png", root / "ng_mask.png"), (root / "ok.png", None), (root / "ng.png", root / "out_mask.png")], [(root / "ok.png", None)], root / "roi.png")
             self.assertTrue(yaml_path.is_file()); self.assertEqual(stats["train"]["images"], 2); self.assertEqual(len(stats["excluded"]), 1)
             self.assertEqual((root / "ds" / "labels" / "train" / "00001.txt").read_text(), "")
-
-    def test_offline_gate_requires_no_extra_misses_and_a_real_gain(self):
-        labels = [True] * 4 + [False] * 10
-        official = [.9, .9, .9, .1] + [.05] * 8 + [.5, .5]
-        candidate = [.9, .9, .9, .9] + [.05] * 8 + [.5, .5]
-        gate = {"max_fpr_increase": 0.0, "min_fpr_reduction_for_equal_fn": 0.01}
-        self.assertEqual(compare_models(official, .4, candidate, .4, labels, gate)["decision"], "promote")
-        self.assertEqual(compare_models(official, .4, official, .4, labels, gate)["decision"], "reject")
-        worse = [.9, .9, .9, .9] + [.6] * 3 + [.05] * 5 + [.5, .5]
-        self.assertEqual(compare_models(official, .4, worse, .4, labels, gate)["decision"], "reject")
-
 
 if __name__ == "__main__":
     unittest.main()

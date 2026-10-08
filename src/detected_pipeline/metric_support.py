@@ -1,4 +1,4 @@
-"""Report-only ROI and foreground segmentation metrics (never training labels)."""
+"""Shared ROI/foreground metrics for reports and calibrated model promotion (never training labels)."""
 from pathlib import Path
 
 import numpy as np
