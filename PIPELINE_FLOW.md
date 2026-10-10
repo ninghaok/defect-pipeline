@@ -1,5 +1,7 @@
 # 完整流程描述（含切换规则、模型策略与参数）
 
+当前基准与相较旧 PR 的变化见 [docs/BASELINE.md](docs/BASELINE.md)。
+
 代码对应：`cli/run_lifecycle.py`（主循环）、`plugins/pretrained_patchcore.py`（预训练）、`plugins/yolo_supervised.py`（YOLO-seg）、
 `training/seg_lifecycle.py`（里程碑训练与门控）、`calibration.py`（阈值规则）。参数来自 `configs/pipeline.yaml`、`configs/pretrained.yaml`、`configs/training.yaml`。
 
@@ -26,7 +28,7 @@
 
 **分割（只对 NG）**：像素阈值 = max(校准 OK 像素 q99.7，0.7 × 本图峰值)；8 连通，去掉 < 128 像素，按峰值排序保留前 3 个区域；mask = 保留区域并集；输出每个区域的框、峰值、均值、面积和叠加图。
 
-**参数**（`pretrained.yaml`）：image_size 224、reference_size 32、coreset 0.02、top_fraction 0.005、pixel_quantile 0.997、peak_fraction 0.7、min_area 128、max_regions 3、boundary_ratio 0.05。单张约 45 ms。
+**参数**（`pretrained.yaml`）：image_size 224、reference_size 32、coreset 0.02、top_fraction 0.005、pixel_quantile 0.997、peak_fraction 0.7、min_area 128、max_regions 3、boundary_ratio 0.05。耗时随硬件与输入变化。
 
 ## 2. 预训练阈值随 NG 积累重标定
 
@@ -38,7 +40,7 @@
 | 1 到 29 | OK 分位阶梯 q80/q90/q95/q97/q99/q99.5/q99.9 | 取能抓住全部已知 NG 的最高档；都抓不住退到 q80（= 误报上限 0.2） |
 | ≥ 30 | 召回优先 | 误报 ≤ 0.2 的候选中召回 ≥ 目标（外圆 0.99，其余 0.95）的选误报最低；不可达时取上限内 Youden（召回 − 误报）最优点 |
 
-阈值与历史写入 `pretrained_cache/<category>/thresholds.json`，附召回阶梯（1.0/0.95/0.9/0.85/0.8 各自的阈值与误报）。预训练切为影子后仍继续重标定，影子结束即停止。
+阈值与历史写入 `pretrained_cache/<category>/thresholds.json`，附召回阶梯（1.0/0.95/0.9/0.85/0.8 各自的阈值与误报）。只有预训练仍为正式模型时继续重标定；YOLO 上线后不保留旧预训练模型作为影子。
 
 ## 3. 复核与回流
 
@@ -65,13 +67,18 @@
 
 候选经冒烟（加载 + 单张推理）后登记到 `model_registry/<category>/versions/<model_version>/`。
 
-## 5. 离线门槛、影子运行与切换
+## 5. 影子运行与切换
 
-1. **离线门槛**：候选训练完在校准集上与当前正式模型比较（正式模型现场重新打分，各用自己的阈值）：候选漏检 ≤ 正式；候选误报率 ≤ 正式 + `max_fpr_increase`（0）；
-   且漏检更少或误报至少降 `min_fpr_reduction_for_equal_fn`（0.01）。不通过 → `rejected_offline`。
-2. **影子运行**：通过的候选从下一批起并行推理，只累计已复核样本。
-3. **判定**：累计复核 NG ≥ `shadow_min_ng`（10）或满 `shadow_max_batches`（5）批，用同样三条规则比较影子样本上的漏检与误报：通过 → 切换为正式模型；否则 `rejected_shadow`。
-   影子期间到达新里程碑则旧候选 `superseded`。切换后不保留旧模型影子。
+1. 候选训练完成后，在校准集确定图像阈值和掩膜阈值，通过加载/推理冒烟后直接进入 `shadow_candidate`。校准集不再承担候选与正式模型的切换比较，没有离线拒绝阶段。
+2. 从下一批开始，候选与正式模型并行推理，正式模型继续负责输出。只累计真实复核且配对的 OK/NG 样本；伪 OK、未复核隐藏真值、独立测试集不参与决策。逐图像素计数当批保存，跨批汇总计数后计算比例，不平均百分比。
+3. 累计有效复核 NG 达到 `shadow_min_ng`（10）或满 `shadow_max_batches`（5）批时，满足以下任一条件即通过：
+   - 候选 C=2FN+FP 低于正式模型；
+   - C 持平且候选 T₅ 严格提高；
+   - 候选 T₅ 比正式模型提高至少 **20 个百分点**（包括恰好20），即使 C 增加也通过。
+4. 新旧模型必须使用相同且无重复的样本，包含有效 OK 和 NG；缺失/无效 GT、预测或旧版本像素计数不能支持通过。T₅ 使用原图5px Chebyshev容差，逐图封顶后汇总 `Σ(A-M5)/Σ(A+min(E5,A))`，图像级漏检按空掩膜计0。差值通过整数交叉乘法比较，不用四舍五入后的百分比。
+5. 通过后 `registry.promote`，从后续批次开始正式输出；否则 `rejected_shadow`。流结束但未达到判定条件的候选保持影子状态，不强制晋升。新里程碑到来时仍在影子的旧候选标为 `superseded`，新候选直接重新开始影子窗口。切换后不保留旧模型影子。
+
+规则版本 `shadow_cost_t5_capped_gain20_v3`。仅生成 `promotion_reports/<category>/shadow_<模型>.json`；没有 `offline_comparison` 或离线拒绝报告。阈值校准结果独立保存在模型 `calibration`，不作切换依据。IoU和分类分项继续报告。历史已完成实验的真实决策和指标不改写；新规则完整实验使用独立工作区，从原流初始化重新执行。
 
 **固定测试集评测**：每个进入产线的模型（预训练每次重标定后、每个 YOLO 候选、切换时）在固定测试集上评测召回、误报、AUROC、NG IoU，写入 `test_reports/<category>/<时间>_<角色>_<模型>/`，
 按 tp/fp/fn/tn 分目录保存原图、原始 mask、预测 mask、热力图、带框图和 score.json；逐图结果缓存，每个模型只推理一次。
@@ -81,7 +88,7 @@
 1. 外圆按 ROI 填白后送入；`predict(conf=0.001, iou=0.7, max_det=100, retina_masks=True, imgsz=1024)`，得到全部低置信候选实例；外圆丢弃与 ROI 不相交的实例。
 2. 图像得分 = 最高实例置信度，无检出为 0。得分 ≥ 图像阈值 → NG；得分在阈值 ±5% 内标边界。
 3. 判 NG 的图：输出置信度 ≥ mask 阈值的实例并集 mask、各实例框与置信度、逐像素最高置信度图、叠加图；判 OK 的图 mask 为空。
-4. 单张 12 到 20 ms（RTX 5080）。
+4. 推理耗时需在部署硬件上单独测量。
 
 ## 7. 单独训练
 
@@ -101,7 +108,6 @@
 | review_sampling high/middle 比例，middle/low 抽检率与最小张数 | 0.20 / 0.40，10%（≥5）/ 2%（≥2） | pipeline.yaml review_sampling |
 | pseudo_ok_in_training | true | pipeline.yaml lifecycle |
 | yolo target_recall / max_fpr | 0.95（外圆 0.99）/ 0.2 | pipeline.yaml lifecycle.yolo_thresholds |
-| promotion max_fpr_increase / min_fpr_reduction | 0.0 / 0.01 | pipeline.yaml lifecycle.promotion |
 | 预训练 zero_ng_quantile | 0.90（外圆 0.95） | pretrained.yaml thresholds |
 | 预训练 ladder_quantiles / full_rule_min_ng | q80…q99.9 / 30 | pretrained.yaml thresholds |
 | 预训练 image_size / reference_size / coreset / top_fraction | 224 / 32 / 0.02 / 0.005 | pretrained.yaml |

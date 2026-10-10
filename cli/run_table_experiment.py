@@ -38,21 +38,20 @@ def verify_source():
     return manifest
 
 
-def prepare(base):
+def prepare(base, dataset_root, weights_archive, amp_checkpoint=None):
     model_root = base / "models"; model_root.mkdir()
-    with zipfile.ZipFile("/gdata1/ninghao/pipeline_models.zip") as archive:
+    with zipfile.ZipFile(weights_archive) as archive:
         for name in WEIGHTS:
             with archive.open("models/" + name) as source, (model_root / name).open("xb") as target:
                 shutil.copyfileobj(source, target)
             (PROJECT / "models" / name).symlink_to(model_root / name)
     # Ultralytics' AMP self-check may use the detection checkpoint; keep it local.
-    detection = Path("/gdata1/huangjd/code/detected/yolo26n.pt")
-    if detection.is_file():
-        (PROJECT / "yolo26n.pt").symlink_to(detection)
+    if amp_checkpoint is not None:
+        (PROJECT / "yolo26n.pt").symlink_to(amp_checkpoint.resolve())
     atomic_write_json(base / "weights.json", {name: sha256_file(model_root / name) for name in WEIGHTS})
     protocol = base / "protocol"
     command(sys.executable, PROJECT / "cli/prepare_simulation_streams.py", "--scenario", "all_data_lifecycle",
-            "--output-root", protocol, "--dataset-root", "/gdata1/ninghao/dataset_523", "--reserve", "qiumian_xiepai=32,100,100", "--stream-mode", "stratified")
+            "--output-root", protocol, "--dataset-root", dataset_root, "--reserve", "qiumian_xiepai=32,100,100", "--stream-mode", "stratified")
     manifest = json.loads((protocol / "stream_manifest.json").read_text())
     audit = []
     for category in manifest["classes"]:
@@ -155,7 +154,13 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--base", type=Path, required=True)
     parser.add_argument("--stage", choices=["smoke", *CATEGORIES], required=True)
-    args = parser.parse_args(); base = args.base.resolve()
+    parser.add_argument("--dataset-root", type=Path, help="Required for the smoke producer")
+    parser.add_argument("--weights-archive", type=Path, help="ZIP containing models/<weight>, required for smoke")
+    parser.add_argument("--amp-checkpoint", type=Path, help="Optional local YOLO detection weight for AMP self-check")
+    args = parser.parse_args()
+    if args.stage == "smoke" and (args.dataset_root is None or args.weights_archive is None):
+        parser.error("smoke requires --dataset-root and --weights-archive")
+    base = args.base.resolve()
     run_root = base / "runs" / args.stage
     run_root.mkdir(parents=True, exist_ok=False)
     status = {"stage": args.stage, "started_at": utc_now(), "status": "running", "pbs_job_id": os.environ.get("PBS_JOBID")}
@@ -168,7 +173,7 @@ def main():
         atomic_write_json(run_root / "environment.json", {"python": sys.executable, "versions": versions,
                           "cuda": torch.version.cuda, "gpu": torch.cuda.get_device_name(0), "source": provenance})
         if args.stage == "smoke":
-            manifest = prepare(base)
+            manifest = prepare(base, args.dataset_root.resolve(), args.weights_archive.resolve(), args.amp_checkpoint)
             manifest_path, row = smoke_view(base, manifest)
             result = run_category(base, run_root, row["category"], manifest_path, row, True)
             atomic_write_json(base / "smoke_ready.json", {"status": "ok", "protocol_sha256": sha256_file(base / "protocol/stream_manifest.json"),

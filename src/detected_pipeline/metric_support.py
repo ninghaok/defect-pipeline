@@ -6,6 +6,27 @@ import cv2
 
 from detected_pipeline.masks import external_gt, internal_mask
 
+TOLERANCE_PIXELS = 5
+SEGMENTATION_METRIC_VERSION = "tolerant_agreement_r5_chebyshev_capped_v2"
+METRICS_SCHEMA = 4
+
+
+def tolerant_counts(gt, pred):
+    """Covered GT / (GT + capped excess), with 5 original pixels of tolerance.
+
+    Clip to the ROI first. Cap excess at GT area separately for each image, then
+    aggregate numerators and denominators. Empty predictions score zero.
+    """
+    kernel = np.ones((2 * TOLERANCE_PIXELS + 1,) * 2, np.uint8)
+    near_gt = cv2.dilate(gt.astype(np.uint8), kernel, borderType=cv2.BORDER_CONSTANT, borderValue=0).astype(bool)
+    near_pred = cv2.dilate(pred.astype(np.uint8), kernel, borderType=cv2.BORDER_CONSTANT, borderValue=0).astype(bool)
+    area = int(gt.sum())
+    matched = int((gt & near_pred).sum())
+    excess = int((pred & ~near_gt).sum())
+    total = area + min(excess, area)
+    return {"tolerant_matched_pixels": matched, "tolerant_total_pixels": total,
+            "tolerant_agreement": matched / total}
+
 
 def segmentation_row(label, gt_path, prediction, shape, roi_path=None, external=True):
     """Raw mask counts; missing annotations stay unavailable, not model errors."""
@@ -38,16 +59,22 @@ def segmentation_row(label, gt_path, prediction, shape, roi_path=None, external=
     intersection = int((gt & pred).sum())
     union = int((gt | pred).sum())
     row.update(gt_status="valid", intersection=intersection, union=union,
-               gt_pixels=int(gt.sum()), predicted_pixels=int(pred.sum()), iou=intersection / union)
+               gt_pixels=int(gt.sum()), predicted_pixels=int(pred.sum()), iou=intersection / union,
+               **tolerant_counts(gt, pred),
+               tolerance_pixels=TOLERANCE_PIXELS, segmentation_metric_version=SEGMENTATION_METRIC_VERSION)
     return row
 
 
 def end_to_end_counts(row, predicted_ng):
     if row.get("gt_status") != "valid":
         return None
+    if row["segmentation_metric_version"] != SEGMENTATION_METRIC_VERSION:
+        raise ValueError("Recompute segmentation counts from masks for the current metric version")
     if not predicted_ng:
-        return {"intersection": 0, "union": row["gt_pixels"], "gt_pixels": row["gt_pixels"], "predicted_pixels": 0, "iou": 0.0}
-    return {k: row[k] for k in ("intersection", "union", "gt_pixels", "predicted_pixels", "iou")}
+        return {"intersection": 0, "union": row["gt_pixels"], "gt_pixels": row["gt_pixels"], "predicted_pixels": 0, "iou": 0.0,
+                "tolerant_matched_pixels": 0, "tolerant_total_pixels": row["gt_pixels"], "tolerant_agreement": 0.0}
+    return {k: row[k] for k in ("intersection", "union", "gt_pixels", "predicted_pixels", "iou",
+                              "tolerant_matched_pixels", "tolerant_total_pixels", "tolerant_agreement")}
 
 
 def aggregate_segmentation(rows, predictions):
@@ -58,9 +85,14 @@ def aggregate_segmentation(rows, predictions):
     union = sum(c["union"] for c in counts)
     pixels = sum(c["gt_pixels"] + c["predicted_pixels"] for c in counts)
     valid = bool(counts) and not invalid
+    matched = sum(c["tolerant_matched_pixels"] for c in counts)
+    total = sum(c["tolerant_total_pixels"] for c in counts)
     return {"iou_micro": intersection / union if valid else None,
             "dice_micro": 2 * intersection / pixels if valid else None,
             "mean_iou_all_ng": float(np.mean([c["iou"] for c in counts])) if valid else None,
             "segmentation_valid_ng": len(counts), "segmentation_invalid_ng": invalid,
             "segmentation_status": "incomplete_gt_or_prediction" if invalid else "valid" if counts else "no_valid_ng",
-            "intersection": intersection, "union": union}
+            "intersection": intersection, "union": union,
+            "tolerant_matched_pixels": matched, "tolerant_total_pixels": total,
+            "tolerant_agreement_micro": matched / total if valid else None,
+            "tolerance_pixels": TOLERANCE_PIXELS, "segmentation_metric_version": SEGMENTATION_METRIC_VERSION}

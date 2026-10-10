@@ -276,7 +276,7 @@ def main():
     parser.add_argument('--prepare-only',action='store_true'); a=parser.parse_args()
     arguments={k:v for k,v in vars(a).items() if k not in ('prepare_only','run_root','dataset_root','counts','skip_full','max_fpr')}  # counts do not affect the split; allow adding runs later
     arguments.update(dataset_root=str(a.dataset_root),run_root=None)
-    run=a.run_root or Path('C:/ninghao/results')/('yolo_seg_ng_count_'+datetime.now().strftime('%Y%m%d_%H%M%S'))
+    run=a.run_root or Path('results')/('yolo_seg_ng_count_'+datetime.now().strftime('%Y%m%d_%H%M%S'))
     run.mkdir(parents=True,exist_ok=True); mp=run/'split_manifest.json'
     if a.epochs<=0 or a.batch<=0 or a.patience<0 or not 0<a.target_recall<=1 or not 0<a.conf_floor<1 or not 0<a.max_fpr<=1: raise ValueError('Invalid training/calibration arguments')
     if not a.classes or len(set(a.classes))!=len(a.classes) or any(c not in SPECS for c in a.classes): raise ValueError('Invalid categories')

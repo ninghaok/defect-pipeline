@@ -1,0 +1,2 @@
+# Explicit generator-free control; use a fresh result workspace.
+enabled: false
