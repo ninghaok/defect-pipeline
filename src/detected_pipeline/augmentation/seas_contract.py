@@ -174,5 +174,3 @@ def validate_generated(manifest_path, request_path, forbidden_sha, allow_unrevie
         chosen.append({**row, "image": str(paths[0]), "mask": str(paths[1]),
                        "human_approved": human})
     return result, chosen
-
-
