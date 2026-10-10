@@ -1,36 +1,17 @@
-"""Paired calibration/shadow promotion; fixed-test results never enter this module."""
-from pathlib import Path
-
-from detected_pipeline.metric_support import segmentation_row
+"""Promotion on paired, reviewed shadow samples; calibration only sets thresholds."""
+from detected_pipeline.metric_support import SEGMENTATION_METRIC_VERSION, TOLERANCE_PIXELS
 from detected_pipeline.online_metrics import aggregate_reviewed_metrics
-from detected_pipeline.roi import read_image
 from detected_pipeline.util import utc_now
 
-PROMOTION_RULE = "pareto_recall_fpr_micro_iou_v1"
-
-
-def score_calibration(items, predict, image_threshold, roi_mask=None):
-    """Score (image, internal GT mask or None) with each model's deployed thresholds."""
-    rows = []
-    for image, gt_mask in items:
-        image = Path(image)
-        result = predict(image)
-        predicted_ng = float(result["score"]) >= image_threshold
-        mask = result.get("mask")
-        row = segmentation_row("NG" if gt_mask else "OK", gt_mask, mask if predicted_ng else None,
-                               read_image(image).shape[:2], roi_mask, external=False)
-        if predicted_ng and row["gt_status"] == "valid" and mask is None:
-            row["gt_status"] = "missing_prediction"
-        row.update(sample_id=str(image), predicted_ng=predicted_ng)
-        rows.append(row)
-    return rows
+PROMOTION_RULE = "shadow_cost_t5_capped_gain20_v3"
+TOLERANCE_GAIN_POINTS = 20
 
 
 def compare_models(official_rows, candidate_rows):
-    """Require all three metrics non-worse and at least one strictly better on paired rows.
+    """Lower cost, a better equal-cost T5, or a T5 gain of at least 20 points wins.
 
-    Count comparisons and cross-multiplied IoU avoid rounding-dependent minimum gains.
-    Missing metrics (including legacy shadow state) never silently become zero.
+    Both models must be evaluated on the same verified OK/NG cohort. Test-set
+    metrics never enter this gate. Cross-products avoid rounded tie-break gains.
     """
     report = {"rule": PROMOTION_RULE, "decision": "reject", "checks": {}, "compared_at": utc_now()}
     required = {"sample_id", "label", "gt_status", "predicted_ng"}
@@ -40,24 +21,32 @@ def compare_models(official_rows, candidate_rows):
     new_ids = [(r["sample_id"], r["label"]) for r in candidate_rows]
     if old_ids != new_ids or len(set(x[0] for x in old_ids)) != len(old_ids):
         return {**report, "reason": "unpaired_samples"}
+    if any(r.get("segmentation_metric_version") != SEGMENTATION_METRIC_VERSION
+           or r.get("tolerance_pixels") != TOLERANCE_PIXELS
+           for r in [*official_rows, *candidate_rows] if r.get("gt_status") == "valid"):
+        return {**report, "reason": "missing_or_legacy_tolerance_counts"}
     metrics = [aggregate_reviewed_metrics(rows) for rows in (official_rows, candidate_rows)]
     old, new = [{**m["classification"], **m["segmentation"], "scope": "paired_promotion_cohort"} for m in metrics]
     report.update(official=old, candidate=new)
     complete = all(m["recall"] is not None and m["ok_false_positive_rate"] is not None
-                   and m["iou_micro"] is not None and m["segmentation_status"] == "valid"
+                   and m["tolerant_agreement_micro"] is not None and m["segmentation_status"] == "valid"
                    and m["excluded_invalid_gt"] == 0 for m in (old, new))
     if not complete:
         return {**report, "checks": {"metrics_available": False}, "reason": "insufficient_or_invalid_metrics"}
     # Identical sample/label sequence guarantees equal NG and OK denominators.
-    old_iou_product = old["intersection"] * new["union"]
-    new_iou_product = new["intersection"] * old["union"]
-    improved = {"recall": new["tp"] > old["tp"], "ok_false_positive_rate": new["fp"] < old["fp"],
-                "iou_micro": new_iou_product > old_iou_product}
-    checks = {"metrics_available": True, "no_extra_misses": new["fn"] <= old["fn"],
-              "no_extra_false_positives": new["fp"] <= old["fp"],
-              "recall_not_worse": new["tp"] >= old["tp"],
-              "fpr_not_worse": new["fp"] <= old["fp"],
-              "iou_not_worse": new_iou_product >= old_iou_product, "real_gain": any(improved.values())}
-    return {**report, "decision": "promote" if all(checks.values()) else "reject", "checks": checks,
-            "reason": "pareto_improvement" if all(checks.values()) else "regression_or_no_gain",
-            "improved_metrics": [name for name, better in improved.items() if better]}
+    better_tolerance = new["tolerant_matched_pixels"] * old["tolerant_total_pixels"] > old["tolerant_matched_pixels"] * new["tolerant_total_pixels"]
+    lower_cost = new["error_cost"] < old["error_cost"]
+    equal_cost = new["error_cost"] == old["error_cost"]
+    # T_new - T_old >= 20/100, evaluated exactly from pooled pixel counts.
+    tolerance_gain = (new["tolerant_matched_pixels"] * old["tolerant_total_pixels"]
+                      - old["tolerant_matched_pixels"] * new["tolerant_total_pixels"])
+    large_tolerance_gain = (100 * tolerance_gain >= TOLERANCE_GAIN_POINTS
+                            * old["tolerant_total_pixels"] * new["tolerant_total_pixels"])
+    promote = lower_cost or (equal_cost and better_tolerance) or large_tolerance_gain
+    reason = ("lower_error_cost" if lower_cost else "equal_cost_better_tolerance" if equal_cost and better_tolerance
+              else "tolerance_gain_at_least_20_points" if large_tolerance_gain else "higher_error_cost" if not equal_cost else "equal_cost_no_tolerance_gain")
+    return {**report, "decision": "promote" if promote else "reject", "reason": reason,
+            "checks": {"metrics_available": True, "lower_error_cost": lower_cost,
+                       "equal_error_cost": equal_cost, "tolerance_improved": better_tolerance,
+                       "tolerance_gain_at_least_20_points": large_tolerance_gain},
+            "improved_metrics": (["error_cost"] if lower_cost else []) + (["tolerant_agreement_micro"] if better_tolerance else [])}

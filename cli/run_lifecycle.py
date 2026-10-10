@@ -4,7 +4,7 @@
   every batch          model-NG fully reviewed; model-OK spot-checked by score segment (top 20 % full, middle 40 %
                        at 10 %, low 40 % at 2 %; an NG in a sample escalates the segment); unreviewed = pseudo OK
   every 5 NG           pretrained threshold re-selected (ladder < 30 NG, recall-first >= 30)
-  40 NG, +20, +40      YOLO-seg candidate: offline gate on the calibration set -> shadow from the next batch ->
+  40 NG, +20, +40      YOLO-seg candidate: threshold calibration + smoke test -> shadow from the next batch ->
                        judged after >= shadow_min_ng reviewed NG (or shadow_max_batches) -> promote or reject
   every model          evaluated on the fixed test set (report only)
 """
@@ -30,7 +30,8 @@ from detected_pipeline.evaluation import fixed_test_metrics, score_fixed_test, w
 from detected_pipeline.experiment_observation import batch_snapshot
 from detected_pipeline.feedback import FeedbackStore
 from detected_pipeline.online_metrics import aggregate_reviewed_metrics, reviewed_metric_rows, reviewed_metrics
-from detected_pipeline.promotion import PROMOTION_RULE, compare_models, score_calibration
+from detected_pipeline.promotion import compare_models
+from detected_pipeline.reporting import batch_model_usage
 from detected_pipeline.plugins import load_pretrained_plugin
 from detected_pipeline.plugins.yolo_supervised import YoloFeedbackAdapter, YoloSegDetector
 from detected_pipeline.registry import ModelRegistry
@@ -40,7 +41,7 @@ from detected_pipeline.training.runner import smoke_test_seg
 from detected_pipeline.training.seg_lifecycle import confirmed_rows, next_milestone, train_candidate
 from detected_pipeline.util import atomic_write_json, sha256_file, utc_now
 
-KEYS = ("recall", "ok_false_positive_rate", "test_auroc", "iou_micro", "mean_iou_all_ng")
+KEYS = ("recall", "ok_false_positive_rate", "test_auroc", "iou_micro", "mean_iou_all_ng", "error_cost", "tolerant_agreement_micro")
 
 
 def per_category(value, category, default):
@@ -103,6 +104,9 @@ def main():
     config = load_project_config(PROJECT); categories = list(config["categories"]); category = args.category
     if category not in categories:
         p.error(f"unknown category: {category}")
+    if config["synthetic"]["enabled"]:
+        from detected_pipeline.augmentation.bounded import validate_policy
+        validate_policy(config["synthetic"])
     life = dict(config["lifecycle"]); workspace = Path(config["workspace_root"]); roi_mask = roi_mask_for(config, category)
     for key in ("first_train_ng", "retrain_increment", "retrain_increment_after", "retrain_increment_late"):
         life[key] = per_category(life.get(key), category, life.get(key))
@@ -124,7 +128,18 @@ def main():
     paths = random_stream(paths, stream_seed) if stream_mode == "random" else evenly_mixed_stream(paths, batch_size, stream_seed)
     paths = [x for x in paths if not store.contains(category, sha256_file(x))]
 
-    pretrained = load_pretrained_plugin(Path(config["pretrained_config"]), PROJECT)
+    augmentation_context = None
+    if config.get("synthetic", {}).get("enabled", False):
+        from detected_pipeline.augmentation.bounded import pixel_digest
+        from detected_pipeline.augmentation.seas_contract import ReloadablePretrained
+        pretrained = ReloadablePretrained(lambda: load_pretrained_plugin(Path(config["pretrained_config"]), PROJECT))
+        excluded_images = reference_ok + calibration_ok + [Path(r["image"]) for r in fixed_test]
+        augmentation_context = {"initial_bank_sha": {sha256_file(p) for p in bank_ok},
+                                "forbidden_sha": {sha256_file(p) for p in excluded_images},
+                                "forbidden_pixel_sha": {pixel_digest(p) for p in excluded_images},
+                                "release": pretrained.release_for_generation}
+    else:
+        pretrained = load_pretrained_plugin(Path(config["pretrained_config"]), PROJECT)
     pretrained.prepare_category(category, reference_ok + bank_ok, calibration_ok)
     test_cache = workspace / "test_cache" / category
 
@@ -276,16 +291,13 @@ def main():
             atomic_write_json(workspace / "batch_reports" / category / f"batch_{state['reviewed_batches']:04d}.json", report)
             atomic_write_json(state_path, state)
 
-            # ---- shadow judgement (same gate as offline, on reviewed shadow rows)
+            # ---- promotion is decided only on paired, reviewed shadow rows
             if candidate is not None:
                 shadow_ng = sum(r["truth"] == "NG" and r.get("official_metrics", {}).get("gt_status") == "valid"
                                 for r in state["shadow_rows"])
                 if shadow_ng >= int(life.get("shadow_min_ng", 10)) or state["shadow_batches"] >= int(life.get("shadow_max_batches", 5)):
                     verdict = compare_models([r.get("official_metrics", {}) for r in state["shadow_rows"]],
                                              [r.get("shadow_metrics", {}) for r in state["shadow_rows"]])
-                    if state["candidate"].get("offline_comparison", {}).get("rule") != PROMOTION_RULE:
-                        verdict.update(decision="reject", reason="legacy_offline_gate_requires_reevaluation")
-                        verdict["checks"]["offline_rule_current"] = False
                     verdict.update(stage="shadow", reviewed=len(state["shadow_rows"]), ng=shadow_ng, batches=state["shadow_batches"], model_version=state["candidate"]["model_version"])
                     atomic_write_json(workspace / "promotion_reports" / category / f"shadow_{state['candidate']['model_version']}.json", verdict)
                     meta_path = registry.root / category / "versions" / state["candidate"]["model_version"] / "model.json"
@@ -309,7 +321,7 @@ def main():
             if official is pretrained:
                 recalibrate_pretrained()
 
-            # ---- YOLO milestone: train, offline gate, start shadow
+            # ---- YOLO milestone: train, calibrate thresholds, smoke test, start shadow
             labeled_ng = store.counts(category)["labeled_pool"]
             milestone = next_milestone(labeled_ng, state["last_milestone"], life)
             if milestone:
@@ -321,49 +333,29 @@ def main():
                     superseded = json.loads(meta_path.read_text(encoding="utf-8")); superseded["status"] = "superseded"; atomic_write_json(meta_path, superseded)
                     state["history"].append({"event": "superseded", "at": utc_now(), "model": state["candidate"]["model_version"]})
                     state["candidate"] = None; state["shadow_rows"] = []; state["shadow_batches"] = 0
-                summary = train_candidate(workspace, category, milestone, config, calibration_ok, roi_mask)
+                kwargs = {"augmentation_context": augmentation_context} if augmentation_context is not None else {}
+                summary = train_candidate(workspace, category, milestone, config, calibration_ok, roi_mask, **kwargs)
                 smoke_image = Path(summary["calibration_records"][0]["image"])
                 metadata = registry.register_candidate(category, summary["model_version"], Path(summary["checkpoint"]), f"milestone-v{milestone}",
                                                        summary["thresholds"], lambda path: smoke_test_seg(path, smoke_image, config["training"].get("inference", {}), roi_mask))
                 metadata.update({"milestone": milestone, "calibration": summary["calibration"], "counts": summary["counts"]})
-                # Use only the candidate's calibration cohort and internal GT masks, never fixed-test metrics.
-                ng_masks = {r["copy_path"]: Path(r["mask"]) for r in confirmed_rows(workspace, category, "NG")}
-                cal_items = [(Path(r["image"]), ng_masks[r["image"]] if r["label"] == "NG" else None)
-                             for r in summary["calibration_records"]]
-                candidate_threshold = float(summary["thresholds"]["image_threshold"])
-                scorer = YoloSegDetector(Path(summary["checkpoint"]), config["training"].get("inference", {}), roi_mask)
-                candidate_rows = score_calibration(cal_items, yolo_predict_fn(scorer, float(summary["thresholds"]["mask_conf_threshold"])),
-                                                   candidate_threshold, roi_mask)
-                del scorer
-                if official is pretrained:
-                    official_threshold = float(pretrained.thresholds[category]["image_threshold"])
-                    official_rows = score_calibration(cal_items, pretrained_predict, official_threshold, roi_mask)
-                else:
-                    scorer = YoloSegDetector(Path(production["checkpoint"]), config["training"].get("inference", {}), roi_mask)
-                    official_threshold = float(production["thresholds"]["image_threshold"])
-                    official_rows = score_calibration(cal_items, yolo_predict_fn(scorer, float(production["thresholds"]["mask_conf_threshold"])),
-                                                      official_threshold, roi_mask)
-                    del scorer
-                comparison = compare_models(official_rows, candidate_rows)
-                comparison.update(official_threshold=official_threshold, candidate_threshold=candidate_threshold)
-                comparison["stage"] = "offline"; metadata["offline_comparison"] = comparison
-                metadata["status"] = "shadow_candidate" if comparison["decision"] == "promote" else "rejected_offline"
+                metadata["status"] = "shadow_candidate"
                 metadata["fixed_test"] = test_yolo(metadata, "candidate")
                 atomic_write_json(registry.root / category / "versions" / summary["model_version"] / "model.json", metadata)
-                atomic_write_json(workspace / "promotion_reports" / category / f"offline_{summary['model_version']}.json", {**comparison, "model_version": summary["model_version"]})
                 state["last_milestone"] = milestone
                 state["history"].append({"event": "candidate_trained", "at": utc_now(), "model": summary["model_version"], "milestone": milestone, "labeled_ng": labeled_ng,
-                                         "offline_decision": comparison["decision"], "fixed_test": {k: metadata["fixed_test"][k] for k in KEYS} if metadata.get("fixed_test") else None})
-                if comparison["decision"] == "promote":
-                    state["candidate"] = metadata; state["shadow_rows"] = []; state["shadow_batches"] = 0
-                    candidate = yolo_adapter(metadata, workspace, config, "shadow_yolo", roi_mask)
+                                         "fixed_test": {k: metadata["fixed_test"][k] for k in KEYS} if metadata.get("fixed_test") else None})
+                state["candidate"] = metadata; state["shadow_rows"] = []; state["shadow_batches"] = 0
+                candidate = yolo_adapter(metadata, workspace, config, "shadow_yolo", roi_mask)
                 if official is not pretrained:
                     official = yolo_adapter(production, workspace, config, "production_yolo", roi_mask)
                 atomic_write_json(state_path, state)
             report["end_of_batch"] = batch_snapshot(workspace, category, state, config, calibration_sha, roi_mask)
+            next_model = production["model_version"] if official is not pretrained else "pretrained"
+            report["model_usage"] = batch_model_usage(state["reviewed_batches"], report["official_model"], next_model)
             atomic_write_json(workspace / "batch_reports" / category / f"batch_{state['reviewed_batches']:04d}.json", report)
             print(json.dumps({"batch": state["reviewed_batches"], "processed": len(pending), "reviewed": report["reviewed"], "labeled_ng": labeled_ng,
-                              "official": production["model_version"] if official is not pretrained else "pretrained",
+                              "official_model_used": report["official_model"], "next_official_model": next_model,
                               "shadow": state["candidate"]["model_version"] if state.get("candidate") else None, "last_milestone": state["last_milestone"]}, ensure_ascii=False), flush=True)
     finally:
         if official is not pretrained:

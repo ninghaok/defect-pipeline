@@ -267,6 +267,7 @@ def test_lifecycle_reports_keep_hidden_truth_out_of_verified_metrics(tmp_path, m
     category = "qiumian_fupai"
     config = load_project_config(Path(__file__).resolve().parents[1])
     config["categories"] = {category: {}}; config["workspace_root"] = str(tmp_path / "workspace")
+    config["synthetic"] = {"enabled": False}  # This test isolates review/reporting.
     source = tmp_path / category
     make_image(source / "NG" / "caught.png", 50); make_image(source / "NG" / "miss.png", 80)
     for name in ("caught", "miss"):

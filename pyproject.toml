@@ -16,7 +16,7 @@ dependencies = [
 
 [project.optional-dependencies]
 train = ["ultralytics==8.4.115"]
-test = []
+test = ["pytest>=8.0"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

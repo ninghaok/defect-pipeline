@@ -7,9 +7,9 @@ param(
     [ValidateRange(-1.0,0.999999)][double]$DiMianNgRatio = -1,
     [ValidateRange(-1.0,0.999999)][double]$WaiYuanNgRatio = -1,
     [string]$RunName = "lifecycle_seg",
-    [string]$DatasetRoot = "D:\dataset_523\dataset_523",
+    [string]$DatasetRoot = "data/dataset_523",
     [string[]]$Categories = @('qiumian_fupai','qiumian_xiepai','di_mian_detection','wa_yuan_detection'),
-    [string]$Python = "D:\conda_data\envs\pipeline\python.exe"
+    [string]$Python = "python"
 )
 $ErrorActionPreference = "Stop"
 $Project = Split-Path -Parent $PSScriptRoot
