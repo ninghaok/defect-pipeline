@@ -1,5 +1,5 @@
 seed: 42
-dataset_root: 'D:\dataset_523\dataset_523'
+dataset_root: 'data/dataset_523'
 category_directories:
   qiumian_fupai: qiumianfupai
   qiumian_xiepai: qiumianxiepai

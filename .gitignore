@@ -55,3 +55,7 @@ venv/
 *.tgz
 *.whl
 *.bundle
+
+# Per-machine backend paths and source pins
+*.local.yaml
+*.local.yml

@@ -1,7 +1,7 @@
 # 评测指标约定
 
 本约定适用于在线批次、在线汇总、固定测试集和单独 YOLO 测试。报告中的
-`primary_segmentation_metric` 为 `iou_micro`。标定阈值的优化目标和模型晋升规则不在本次修改范围内。
+`primary_segmentation_metric` 为 `iou_micro`。T₅ 与错误成本 C 同时报告，当前切换规则见 [BASELINE.md](BASELINE.md)。
 
 ## 真值与样本范围
 
@@ -55,6 +55,21 @@ ROI 白色区域为检测域。GT 和预测 mask 都与相同 ROI 求交；YOLO 
 
 固定测试的预测图保留原始定位输出，用于分析“有 mask 但分类漏检”的现象；它不等于最终产线 mask。
 GT 问题与 ROI 排除明细写入 `report.json` 的 `gt_issues`。
+
+## 错误成本和 T₅
+
+`error_cost = 2*FN + FP`；`ok_false_positive_rate = FP/(FP+TN)`（FPR，误报率）。
+分类指标从样本计数重算，不平均批次百分比。
+
+T₅ 使用原图 5 像素 Chebyshev 容差（11×11 方形膨胀）：每张有效 NG 的 GT 面积为 A，
+距离预测超过 5 像素的 GT 面积为 M₅，距离 GT 超过 5 像素的预测面积为 E₅。
+逐图保存 `tolerant_matched_pixels = A-M₅` 与 `tolerant_total_pixels = A+min(E₅,A)`，
+汇总后相除得到 `tolerant_agreement_micro`。漏检按空预测计入 0/A，OK 误报由 FPR/C 表示。
+多预测面积逐图封顶为 A，不能对整个数据集的 E₅ 合计后才封顶，也不能平均逐图 T₅。
+
+当前 schema 为 4，版本为 `tolerant_agreement_r5_chebyshev_capped_v2`。旧指标必须从掩膜重算；
+缓存身份包含指标版本。IoU 不变；T₅ 的容差和面积封顶有意减轻了定位误差的惩罚，二者须同时报告。
+切换条件见 [BASELINE.md](BASELINE.md)，独立测试集不参与决定。
 
 ## AUROC 和缓存
 

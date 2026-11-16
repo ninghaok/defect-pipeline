@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 from detected_pipeline.util import sha256_file
+from detected_pipeline.metric_support import METRICS_SCHEMA, SEGMENTATION_METRIC_VERSION
 
 
 def fingerprint(value):
@@ -18,7 +19,8 @@ def file_identity(path):
 
 
 def test_identity(items, model_key, roi_path, inference_settings=None):
-    return fingerprint({"schema": 2, "model": model_key, "roi": file_identity(roi_path),
+    return fingerprint({"schema": METRICS_SCHEMA, "segmentation_metric_version": SEGMENTATION_METRIC_VERSION,
+                        "model": model_key, "roi": file_identity(roi_path),
                         "inference": inference_settings or {},
                         "items": [{"image": file_identity(i["image"]), "label": i["label"],
                                    "mask": file_identity(i.get("mask"))} for i in items]})

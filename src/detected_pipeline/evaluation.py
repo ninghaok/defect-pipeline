@@ -19,7 +19,7 @@ import numpy as np
 
 from detected_pipeline.calibration import auroc, classification_metrics
 from detected_pipeline.cache_identity import test_identity
-from detected_pipeline.metric_support import aggregate_segmentation, end_to_end_counts, segmentation_row
+from detected_pipeline.metric_support import METRICS_SCHEMA, aggregate_segmentation, end_to_end_counts, segmentation_row
 from detected_pipeline.masks import internal_mask
 from detected_pipeline.roi import read_image, write_image
 from detected_pipeline.util import atomic_write_json, utc_now
@@ -108,7 +108,7 @@ def fixed_test_metrics(rows: list[dict[str, Any]], image_threshold: float) -> di
     result = classification_metrics(labels, predicted)
     segmentation = aggregate_segmentation(rows, [r["score"] >= image_threshold for r in rows])
     result.update({"test_auroc": auroc(scores, labels), "image_threshold": float(image_threshold),
-                   **segmentation, "primary_segmentation_metric": "iou_micro", "metrics_schema": 2,
+                   **segmentation, "primary_segmentation_metric": "tolerant_agreement_micro", "metrics_schema": METRICS_SCHEMA,
                    "test_ok": int(sum(not l for l in labels)), "test_ng": int(sum(labels)),
                    "excluded_invalid_gt": sum(r["label"] == "INVALID_GT" for r in rows),
                    "excluded_outside_roi": int(sum(r["label"] == "EXCLUDED" for r in rows))})
@@ -141,12 +141,15 @@ def write_test_report(workspace: Path, category: str, model_version: str, role: 
         details = {"gt_status": row["gt_status"], "raw_localization_iou": row["iou"],
                    "end_to_end_iou": counts["iou"] if counts else None,
                    "intersection": counts["intersection"] if counts else None,
-                   "union": counts["union"] if counts else None}
+                   "union": counts["union"] if counts else None,
+                   "tolerant_matched_pixels": counts["tolerant_matched_pixels"] if counts else None,
+                   "tolerant_total_pixels": counts["tolerant_total_pixels"] if counts else None,
+                   "tolerant_agreement": counts["tolerant_agreement"] if counts else None}
         atomic_write_json(target / "score.json", {**row.get("extra", {}), "image": row["image"], "label": row["label"], "case": case, "score": row["score"],
                                                   "image_threshold": float(image_threshold), "iou": row["iou"], **details})
         cases.append({"case": case, "index": row["index"], "image": row["image"], "label": row["label"], "score": row["score"], "iou": row["iou"], **details})
     with (folder / "cases.csv").open("w", encoding="utf-8-sig", newline="") as handle:
-        writer = csv.DictWriter(handle, fieldnames=["case", "index", "image", "label", "score", "iou", "gt_status", "raw_localization_iou", "end_to_end_iou", "intersection", "union"]); writer.writeheader(); writer.writerows(cases)
+        writer = csv.DictWriter(handle, fieldnames=["case", "index", "image", "label", "score", "iou", "gt_status", "raw_localization_iou", "end_to_end_iou", "intersection", "union", "tolerant_matched_pixels", "tolerant_total_pixels", "tolerant_agreement"]); writer.writeheader(); writer.writerows(cases)
     report["counts_by_case"] = {c: sum(r["case"] == c for r in cases) for c in CASES}; report["folder"] = str(folder)
     report["gt_issues"] = [{"image": r["image"], "gt_mask": r.get("gt_mask"), "status": r["gt_status"]}
                            for r in rows if r["gt_status"] not in ("valid", "not_required")]

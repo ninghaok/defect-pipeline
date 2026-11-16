@@ -39,7 +39,6 @@ def category_metrics(workspace, category, roi_mask=None):
     classification, segmentation = result["classification"], result["segmentation"]
     tn, fp = classification["tn"], classification["fp"]
     return {"category": category, **result["classification"], **result["segmentation"],
-            "metrics_schema": 2,
             # Preserve old field meanings for downstream consumers; primary IoU is explicit.
             "false_positive_rate": classification["ok_false_positive_rate"],
             "specificity": tn / (tn + fp) if tn + fp else None,

@@ -11,7 +11,7 @@ max instance confidence; image threshold = recall-first under the FPR cap (targe
 = best mean NG IoU.  ROI categories: outside filled white, GT ANDed with the ROI, NG entirely outside excluded.
 
 Example:
-    python cli/train_yolo.py --category di_mian_detection --output C:\\ninghao\\results\\train_dimian
+    python cli/train_yolo.py --category di_mian_detection --output results/train_dimian
     python cli/train_yolo.py --category wa_yuan_detection --train-ng-limit 60 --epochs 100 --skip-test
 The resulting summary.json carries checkpoint + thresholds in the format the lifecycle registry uses, so
 the model can be used by plugins.yolo_supervised.YoloFeedbackAdapter directly.
@@ -111,7 +111,7 @@ def evaluate(detector, items: list[tuple[Path, bool]], thresholds: dict, out: Pa
 def main() -> None:
     p = argparse.ArgumentParser(description="train one YOLO-seg model with the lifecycle method")
     p.add_argument("--category", required=True, help="pipeline category name, e.g. di_mian_detection (selects ROI and target recall)")
-    p.add_argument("--dataset-root", type=Path, default=Path(r"D:\dataset_523\dataset_523"))
+    p.add_argument("--dataset-root", type=Path, default=PROJECT / "data/dataset_523")
     p.add_argument("--source-dir", default=None, help="dataset folder name under dataset-root (default from configs/pipeline.yaml)")
     p.add_argument("--output", type=Path, required=True)
     p.add_argument("--train-ok-limit", type=int, default=None, help="default lifecycle.train_ok_limit (400)")

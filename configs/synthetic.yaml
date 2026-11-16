@@ -1,0 +1,25 @@
+# Enabled by default. Configure the external backend before running the lifecycle.
+# For a generator-free control, use configs/synthetic_baseline.yaml explicitly.
+enabled: true
+# External audited SeaS service; argv, never a shell command. Use an absolute Python
+# and service path in a separate environment. See docs/SYNTHETIC_AUGMENTATION.md.
+command: []
+reuse_root: null
+# Pin every .py file alongside the backend service, plus the service itself.
+backend_sha256: {}
+allow_structurally_valid_unreviewed: false
+seed: 42
+min_real_train_ng: 20
+min_true_ok: 20
+max_support_ng: 40
+max_support_ok: 60
+refresh_new_real_ng: 20
+max_events: 8
+max_train_synthetic: 20
+max_synthetic_per_real_ng: 0.10
+max_synthetic_fraction: 0.03
+max_positive_fraction_increase: 0.02
+area_match_factor: 2.0
+# SeaS formal protocol: 800 + 800 steps, 40 structurally valid outputs,
+# at most 120 raw candidates/event. No indefinite refill on quality rejection.
+generation_config: {}

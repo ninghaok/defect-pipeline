@@ -31,6 +31,7 @@ def classification_metrics(labels: Sequence[bool], predictions: Sequence[bool]) 
     y = np.asarray(list(labels), dtype=bool); p = np.asarray(list(predictions), dtype=bool)
     tp = int((p & y).sum()); fp = int((p & ~y).sum()); fn = int((~p & y).sum()); tn = int((~p & ~y).sum())
     return {"tp": tp, "fp": fp, "fn": fn, "tn": tn,
+            "error_cost": 2 * fn + fp if len(y) else None,
             "recall": tp / (tp + fn) if tp + fn else None,
             "ok_false_positive_rate": fp / (fp + tn) if fp + tn else None,
             "precision": tp / (tp + fp) if tp + fp else None,

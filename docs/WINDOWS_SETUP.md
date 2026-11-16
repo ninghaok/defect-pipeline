@@ -3,15 +3,15 @@
 ## 目录
 
 ```text
-E:\ninghao\pipeline                 工程
-D:\dataset_523\dataset_523          数据集：<class>\{train,val,test}\{OK,NG}，<class>\mask\<stem>_t.bmp（黑色为缺陷）
-E:\ninghao\pipeline\models          yolo26s-seg.pt、dinov2_vitl14_pretrain.pth、checkpoints_pro_angle.pth
+<仓库目录>                 工程
+data\dataset_523          数据集：<class>\{train,val,test}\{OK,NG}，<class>\mask\<stem>_t.bmp（黑色为缺陷）
+<仓库目录>\models          yolo26s-seg.pt、dinov2_vitl14_pretrain.pth、checkpoints_pro_angle.pth
 ```
 
 ## 环境
 
 ```powershell
-cd E:\ninghao\pipeline
+# 在克隆后的仓库根目录执行
 Set-ExecutionPolicy -Scope Process Bypass
 .\scripts\setup_windows_pipeline.ps1       # 创建 conda 环境 pipeline（torch cu128、ultralytics 8.4.115 等）
 conda activate pipeline
@@ -24,8 +24,10 @@ python .\cli\check_local_installation.py   # cuda: true, missing: []
 
 ```powershell
 conda activate pipeline
-cd E:\ninghao\pipeline
+# 在克隆后的仓库根目录执行
 $env:KMP_DUPLICATE_LIB_OK = "TRUE"
+# 按 SYNTHETIC_AUGMENTATION.md 生成本机后端配置；增强默认开启
+$env:PIPELINE_SYNTHETIC_CONFIG = "C:/path/to/local-synthetic.yaml"
 .\scripts\run_lifecycle_windows.ps1 -RunName lifecycle_seg_01
 ```
 

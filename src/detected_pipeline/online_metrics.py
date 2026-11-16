@@ -3,7 +3,7 @@ from pathlib import Path
 
 from detected_pipeline.calibration import classification_metrics
 from detected_pipeline.masks import internal_mask
-from detected_pipeline.metric_support import aggregate_segmentation, segmentation_row
+from detected_pipeline.metric_support import METRICS_SCHEMA, aggregate_segmentation, segmentation_row
 from detected_pipeline.roi import read_image
 
 VERIFIED_SOURCES = {"human_review", "folder_ground_truth"}
@@ -33,11 +33,11 @@ def reviewed_metric_rows(rows, decision_key="official", mask_key="official_mask"
 def aggregate_reviewed_metrics(evaluated):
     used = [r for r in evaluated if r["label"] in ("OK", "NG")]
     classification = classification_metrics([r["label"] == "NG" for r in used], [r["predicted_ng"] for r in used])
-    classification.update(scope="reviewed_online_subset", metrics_schema=2, count=len(used), verified_count=len(evaluated),
+    classification.update(scope="reviewed_online_subset", metrics_schema=METRICS_SCHEMA, count=len(used), verified_count=len(evaluated),
                           excluded_outside_roi=sum(r["label"] == "EXCLUDED" for r in evaluated),
                           excluded_invalid_gt=sum(r["label"] == "INVALID_GT" for r in evaluated))
     segmentation = aggregate_segmentation(evaluated, [r["predicted_ng"] for r in evaluated])
-    segmentation.update(scope="reviewed_online_subset", primary_segmentation_metric="iou_micro",
+    segmentation.update(scope="reviewed_online_subset", primary_segmentation_metric="tolerant_agreement_micro",
                         images=segmentation["segmentation_valid_ng"], iou=segmentation["iou_micro"], dice=segmentation["dice_micro"])
     return {"classification": classification, "segmentation": segmentation}
 

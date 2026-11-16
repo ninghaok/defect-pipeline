@@ -45,12 +45,12 @@ lifecycle:
   retrain_increment_late: 40
   # unreviewed OK of a passed segment (pseudo OK) may be used as YOLO training OK (never calibration)
   pseudo_ok_in_training: true
-  # a candidate that passes the offline gate runs as shadow from the next batch; it is judged once the shadow
-  # window holds >= shadow_min_ng reviewed NG or shadow_max_batches batches, with the same gate as offline
+  # Every smoke-tested, threshold-calibrated candidate runs as shadow from the next batch.
+  # Judge only on shadow samples after >= shadow_min_ng reviewed NG or shadow_max_batches batches.
   shadow_min_ng: 10
   shadow_max_batches: 5
   yolo_thresholds:
     target_recall: {default: 0.95, wa_yuan_detection: 0.99}
     max_fpr: 0.2
-  # Both gates: recall/FPR/micro IoU must all be non-worse, with at least one strict improvement.
-  # No minimum FPR reduction; missing metrics cannot pass (see detected_pipeline.promotion).
+  # Shadow gate: lower 2*FN+FP, equal cost with better T5, OR T5 gain >= 20 percentage points.
+  # T5 = sum(A-M5) / sum(A+min(E5,A)); no offline promotion comparison.

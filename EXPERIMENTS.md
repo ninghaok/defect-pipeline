@@ -1,5 +1,7 @@
 # 实验记录（dataset_523，2026-09-15 至 2026-09-21）
 
+> 历史记录：用于追溯当时的实验与规则，不是当前运行规范。当前实现以[基准说明](docs/BASELINE.md)和代码为准。
+
 数据集 `D:\dataset_523\dataset_523`，四个类别：球面俯拍 qiumianfupai、球面斜拍 qiumianxiepai、球塞底面 qiusaidimian、球塞外圆 qiusaiwaiyuan。
 统一协议：train 参与训练或建库，val 整体作校准集（选阈值、选参数，训练时兼作验证集且不做模型选择），test 只报告。seed 42，单次运行。
 外圆使用 ROI `roi/qiusaiwaiyuan.png`（白色为检测区），缺陷完全落在 ROI 外的 NG（训练 17、校准 7、测试 6，共 30 张）从外圆实验中剔除。

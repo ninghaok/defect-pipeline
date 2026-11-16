@@ -17,12 +17,12 @@
 
 ```powershell
 conda activate pipeline
-cd E:\ninghao\pipeline
+# 在仓库根目录执行
 .\scripts\train_yolo_windows.ps1 -Category di_mian_detection
 .\scripts\train_yolo_windows.ps1 -Category wa_yuan_detection -TrainNgLimit 60 -Epochs 100 -SkipTest
 ```
 
-参数：`-TrainOkLimit`（默认 400，seed 打乱后取前 N 张）、`-TrainNgLimit`（默认全部）、`-Epochs`、`-Batch`（显存不足改 2）、`-SkipTest`、`-Output`（默认 `C:\ninghao\results\train_yolo_<类别>_<时间>`）。
+参数：`-TrainOkLimit`（默认 400，seed 打乱后取前 N 张）、`-TrainNgLimit`（默认全部）、`-Epochs`、`-Batch`（显存不足改 2）、`-SkipTest`、`-Output`（默认 `results\train_yolo_<类别>_<时间>`）。
 也可直接调用 `python .\cli\train_yolo.py --category ... --output ...`，其余参数同名。
 
 ## 方法（与 `configs/training.yaml`、`configs/pipeline.yaml` 一致）

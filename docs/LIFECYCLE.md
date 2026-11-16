@@ -27,8 +27,8 @@ YOLO 的得分 0（无检出）永远不是合法阈值。阈值文件附带召�
 
 ## YOLO-seg 里程碑（`training/seg_lifecycle.py`）
 
-- 触发：有效 NG（确认且 mask 合格）达到 40，之后每 +20，100 张后每 +40；外圆从 40 起每 +40（`retrain_increment` 按类别配置）。每个里程碑只用最早的 N 张 NG。
-- 划分：NG 按 (seed, 类别, sha256) 哈希一次性分到训练 75% / 校准 25%，永不改动。校准 OK = 初始化保留的 200 张。
+- 触发：有效 NG（确认且 mask 合格）达到 40，之后每 +20，100 张后每 +40；外圆从 40 起每 +40（`retrain_increment` 按类别配置）。每个里程碑只用最早的 N 张 NG。同批跨过多个里程碑时，只训练其中最高的一个。
+- 划分：NG 按 (seed, 类别, sha256) 哈希一次性分到训练 75% / 校准 25%，永不改动。校准 OK = 初始化保留的 200 张（斜拍 100 张）。
 - 训练 OK：记忆库 OK + 流内确认 OK，按批次分层轮流抽样，最多 400 张。
 - 数据集：mask 转多边形 label，一个连通域一个实例；外圆 ROI 外填白、真值与 ROI 求交，缺陷完全在 ROI 外的 NG 剔除并记录。
 - 训练：yolo26s-seg，1024，batch 4，100 epoch 固定取 last.pt，mosaic 1.0，copy_paste 0.3。校准集兼作 Ultralytics 验证集（不做模型选择，无泄漏）。
@@ -42,31 +42,23 @@ YOLO 的得分 0（无检出）永远不是合法阈值。阈值文件附带召�
 未复核的样本记为伪 OK（`sampling_pseudo_ok_pool`），只作为 YOLO 训练 OK，不进校准。仿真额外记录伪 OK 里实际藏有的 NG 数
 （`review_sampling.pseudo_ok_hidden_ng`），只用于评估抽检策略，不参与任何决策。参数在 `configs/pipeline.yaml` 的 `review_sampling`。
 
-## 离线门槛、影子运行与切换
+## 影子运行与切换
 
-1. **离线门槛**：候选训练完立即在同一校准集上与当前正式模型比较（两者按各自部署阈值重新预测）：
-   漏检张数与误报张数均不增加，Recall 不下降、OK 误报率不增加、micro IoU 不下降，且三项指标至少一项严格改善。
-   分类完全相同、只有 micro IoU 改善也通过；误报率下降不足 1 个百分点也可通过。不通过 → `rejected_offline`，不进影子。
-   使用未舍入的计数比较，IoU 通过整数交叉乘法比较交并比，不设最低改善幅度；全部相同不切换。
-2. **影子运行**：通过的候选从下一批起与正式模型并行推理，只累计可靠复核样本的判定及交集、并集、GT/预测像素数。
-   伪 OK、未复核隐藏真值不参与。像素计数在本批冻结并写入状态，重启不重读旧预测掩膜；跨批先累加交并面积，再计算 micro IoU，不平均批次 IoU。
-3. **判定**：累计 ROI 规则下有效复核 NG ≥ `shadow_min_ng`（10）或满 `shadow_max_batches`（5）批时，用上述同一规则比较：
-   通过 → `registry.promote`，候选成为正式模型；否则 `rejected_shadow`。影子期间若到达新里程碑，旧候选标 `superseded`，新候选重新走门槛与影子。
-4. 切换后不保留旧模型影子。结果写 `promotion_reports/<category>/offline_<模型>.json` 与 `shadow_<模型>.json`。
+1. 候选训练完成后，在校准集确定图像阈值和掩膜阈值，通过加载/推理冒烟后直接进入 `shadow_candidate`。校准集不再承担候选与正式模型的切换比较，没有离线拒绝阶段。
+2. 从下一批开始，候选与正式模型并行推理，正式模型继续负责输出。只累计真实复核且配对的 OK/NG 样本；伪 OK、未复核隐藏真值、独立测试集不参与决策。逐图像素计数当批保存，跨批汇总计数后计算比例，不平均百分比。
+3. 累计有效复核 NG 达到 `shadow_min_ng`（10）或满 `shadow_max_batches`（5）批时，满足以下任一条件即通过：
+   - 候选 C=2FN+FP 低于正式模型；
+   - C 持平且候选 T₅ 严格提高；
+   - 候选 T₅ 比正式模型提高至少 **20 个百分点**（包括恰好20），即使 C 增加也通过。
+4. 新旧模型必须使用相同且无重复的样本，包含有效 OK 和 NG；缺失/无效 GT、预测或旧版本像素计数不能支持通过。T₅ 使用原图5px Chebyshev容差，逐图封顶后汇总 `Σ(A-M5)/Σ(A+min(E5,A))`，图像级漏检按空掩膜计0。差值通过整数交叉乘法比较，不用四舍五入后的百分比。
+5. 通过后 `registry.promote`，从后续批次开始正式输出；否则 `rejected_shadow`。流结束但未达到判定条件的候选保持影子状态，不强制晋升。新里程碑到来时仍在影子的旧候选标为 `superseded`，新候选直接重新开始影子窗口。切换后不保留旧模型影子。
 
-micro IoU 沿用统一端到端口径：仅统计有效 NG 的 ROI 内前景，漏检按空预测计入 GT 并集。
-掩膜置信度仍按原校准规则选择，不改成新的优化目标；逐图平均 IoU 继续报告，但不是切换条件。
-新旧模型必须使用相同样本；缺失/无效 GT 或预测、没有有效 NG、没有 OK 时，指标不完整，不允许切换。
-报告记录规则版本、双方指标、逐项检查、改善项和拒绝原因。固定测试集只报告，不能用于决定切换。
-
-升级建议使用独立新工作区。旧在途候选的离线结论没有 IoU，旧影子状态也没有像素计数，不能直接沿用作新规则的通过证据：
-旧候选到影子裁决时会明确拒绝，已有正式模型保持，后续训练节点按新规则评判。
-历史已完成报告不会改写；新规则不能保证在独立测试集上更好的模型也一定在校准集和影子集上占优。
+规则版本 `shadow_cost_t5_capped_gain20_v3`。仅生成 `promotion_reports/<category>/shadow_<模型>.json`；没有 `offline_comparison` 或离线拒绝报告。阈值校准结果独立保存在模型 `calibration`，不作切换依据。IoU和分类分项继续报告。历史已完成实验的真实决策和指标不改写；新规则完整实验使用独立工作区，从原流初始化重新执行。
 
 ## 固定测试集评测（`evaluation.py`）
 
-每个进入产线的模型都在固定测试集上评测并记录：预训练在每次阈值重标定后（角色 production），YOLO 候选训练完成后（角色 candidate），切换为正式模型时再记一次（角色 production）。
-指标：召回、OK 误报率、精确率、AUROC、NG 前景 micro IoU（主指标），保留逐图平均 IoU 作为辅助值。
+预训练模型和每个训练完成的 YOLO 候选都在固定测试集上评测并记录：预训练在每次阈值重标定后（角色 production），YOLO 候选训练完成后（角色 candidate），切换为正式模型时再记一次（角色 production）。
+指标：召回、OK 误报率、精确率、AUROC、错误成本 C、NG 前景 micro IoU、T₅；逐图平均 IoU 仅作辅助值。
 只检测 ROI 内缺陷，漏检图的 GT 像素仍计入 micro IoU 并集。缺失/无效 GT 会使分割指标不可用，不当成 0 分。
 在线批次与汇总仅统计已验证的审核子集，明确排除初始化 OK 和伪标签，不代表完整在线流。
 逐图得分、预测 mask、热力图、带框图缓存在 `workspace/test_cache/<category>/<模型>/`；数据、GT、ROI、权重或推理参数变更会使缓存失效，
@@ -82,8 +74,8 @@ micro IoU 沿用统一端到端口径：仅统计有效 NG 的 ROI 内前景，�
 ```text
 results/<RunName>/workspace/state/lifecycle_<category>.json      批次、里程碑、事件历史
 results/<RunName>/workspace/batch_reports/<category>/            每批分类与分割指标、影子不一致清单
-results/<RunName>/workspace/promotion_reports/<category>/        每个里程碑的离线比较
-results/<RunName>/workspace/test_reports/<category>/             每个产线模型的固定测试集评测（test_history.jsonl 汇总）
+results/<RunName>/workspace/promotion_reports/<category>/        每个候选的影子比较
+results/<RunName>/workspace/test_reports/<category>/             预训练模型和每个 YOLO 版本的固定测试集评测（test_history.jsonl 汇总）
 results/<RunName>/workspace/model_registry/<category>/           milestones/（训练与标定明细）、versions/、production.json
 results/<RunName>/pretrained_cache/<category>/                   记忆库、校准 OK 得分、thresholds.json（含历史）
 results/<RunName>/pretrained_artifacts/<category>/<sample>/      热力图、mask、regions.json、overlay.png

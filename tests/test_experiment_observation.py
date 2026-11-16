@@ -4,6 +4,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from detected_pipeline.util import atomic_write_json
 from detected_pipeline.roi import write_image
@@ -30,10 +31,17 @@ def test_full_stream_export_counts_hidden_miss_without_mutating_batch(tmp_path):
     before = path.read_bytes()
     result = module.export_category(ws, "cat", {}, tmp_path / "summary")
     saved = json.loads((tmp_path / "summary" / "cat_table.json").read_text(encoding="utf-8"))
-    assert result["completed_rows"] == 1 and len(saved["headers"]) == 15
+    assert result["completed_rows"] == 1 and len(saved["headers"]) == 36
+    assert saved["rows"][0]["在线错误成本"] == 2
+    assert saved["rows"][0]["在线容差吻合率5px"] == pytest.approx(1 / 101)
+    assert saved["headers"][14] == "YOLO独立评测micro IoU"
     row = saved["rows"][0]
     assert row["在线Recall"] == .5 and row["在线micro IoU"] == 1 / 101
     assert row["实际的输入OK/NG数"] == "0/2" and row["需要人工打标的数量"] == 1
+    assert row["在线漏检数"] == 1 and row["在线误报数"] == 0
+    assert not any("离线" in key for key in row)
+    assert row["影子错误成本（正式→候选）"] is None
+    assert row["影子容差吻合率5px（正式→候选）"] is None
     assert path.read_bytes() == before
 
 
